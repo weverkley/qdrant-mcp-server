@@ -1,0 +1,356 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha1"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"github.com/qdrant/go-client/qdrant"
+)
+
+// --- Configuration Struct ---
+type Config struct {
+	QdrantHost       string
+	QdrantPort       int
+	CollectionName   string
+	WatchDirectory   string
+	OllamaHost       string
+	EmbeddingModel   string
+	DebounceDuration time.Duration
+}
+
+func loadConfig() Config {
+	// Parse network boundaries using your specified environment keys
+	host := os.Getenv("QDRANT_HOST")
+	if host == "" {
+		// Fallback parse if full URL was given (e.g. http://172.20.0.5:6334)
+		urlEnv := os.Getenv("QDRANT_URL")
+		if strings.Contains(urlEnv, "172.20.0.5") {
+			host = "172.20.0.5"
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+
+	model := os.Getenv("EMBEDDING_MODEL")
+	if model == "" {
+		model = "nomic-embed-text"
+	}
+
+	return Config{
+		QdrantHost:       host,
+		QdrantPort:       6334, // High-performance gRPC port mapping
+		CollectionName:   os.Getenv("QDRANT_COLLECTION"),
+		WatchDirectory:   os.Getenv("WATCH_DIRECTORY"),
+		OllamaHost:       os.Getenv("OLLAMA_HOST"),
+		EmbeddingModel:   model,
+		DebounceDuration: 800 * time.Millisecond, // Mitigate rapid IDE auto-saves
+	}
+}
+
+// --- Ingestion Structural Blocks ---
+type IngestionWorker struct {
+	cfg          Config
+	qdrantClient *qdrant.Client
+	httpClient   *http.Client
+}
+
+type OllamaEmbedReq struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+}
+
+type OllamaEmbedResp struct {
+	Embedding []float32 `json:"embedding"`
+}
+
+func main() {
+	// Setup localized logs redirected away from stdout to keep MCP channel clean
+	log.SetOutput(os.Stderr)
+	log.Println("Starting Go Qdrant-RAG MCP Server...")
+
+	cfg := loadConfig()
+	if cfg.CollectionName == "" || cfg.WatchDirectory == "" || cfg.OllamaHost == "" {
+		log.Fatal("Fatal: Missing required environment variables (QDRANT_COLLECTION, WATCH_DIRECTORY, OLLAMA_HOST)")
+	}
+
+	// Connect to home lab Qdrant via fast gRPC
+	client, err := qdrant.NewClient(&qdrant.Config{
+		Host: cfg.QdrantHost,
+		Port: cfg.QdrantPort,
+	})
+	if err != nil {
+		log.Fatalf("Failed to establish Qdrant connection: %v", err)
+	}
+	defer client.Close()
+
+	worker := &IngestionWorker{
+		cfg:          cfg,
+		qdrantClient: client,
+		httpClient:   &http.Client{Timeout: 15 * time.Second},
+	}
+
+	// Boot active structural watcher
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf("Failed to spin up filesystem notification systems: %v", err)
+	}
+	defer watcher.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancelHandle(cancel)
+
+	// Spawn decoupled debounced file processor
+	eventChan := make(chan string, 100)
+	go worker.watchLoop(ctx, watcher, eventChan)
+	go worker.ingestionConsumer(ctx, eventChan)
+
+	// Recursively monitor target codebase structure
+	err = filepath.WalkDir(cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if strings.Contains(path, ".git") || strings.Contains(path, "node_modules") {
+				return filepath.SkipDir
+			}
+			return watcher.Add(path)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("Warning: Directory traversal hit path restrictions: %v", err)
+	}
+
+	// Launch standard MCP protocol engine on main thread
+	go worker.listenToMCPClient(ctx)
+
+	// Block gracefully until system signal caught
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+	log.Println("Shutting down Go MCP Server cleanly.")
+}
+
+func cancelHandle(c context.CancelFunc) { c() }
+
+// --- File Watcher & Ingestion Subsystems ---
+func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, eventChan chan<- string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			// Focus explicitly on functional mutation blocks
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
+				if !strings.Contains(event.Name, "~") && !strings.HasSuffix(event.Name, ".tmp") {
+					eventChan <- event.Name
+				}
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("Fsnotify interface raised exception: %v", err)
+		}
+	}
+}
+
+func (iw *IngestionWorker) ingestionConsumer(ctx context.Context, eventChan <-chan string) {
+	timers := make(map[string]*time.Timer)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case path := <-eventChan:
+			// Debounce frequent chunks to avoid thrashing remote CPU/Network resources
+			if timer, exists := timers[path]; exists {
+				timer.Stop()
+			}
+			timers[path] = time.AfterFunc(iw.cfg.DebounceDuration, func() {
+				iw.syncFileState(context.Background(), path)
+			})
+		}
+	}
+}
+
+func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		log.Printf("File removed on dev machine, purging remote vectors: %s", path)
+		_ = iw.purgeFileVectors(ctx, path)
+		return
+	} else if err != nil {
+		return
+	}
+
+	if info.IsDir() {
+		return
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("Unable to read local content block: %v", err)
+		return
+	}
+
+	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
+	_ = iw.purgeFileVectors(ctx, path)
+
+	if len(content) == 0 {
+		return
+	}
+
+	// Segment structural boundaries line-by-line or by chunk blocks
+	chunks := iw.chunkText(string(content), 1000)
+	var points []*qdrant.PointStruct
+
+	for idx, chunk := range chunks {
+		vector, err := iw.fetchRemoteEmbedding(ctx, chunk)
+		if err != nil {
+			log.Printf("Ollama vectorization failed on remote endpoint: %v", err)
+			continue
+		}
+
+		// Ensure unique points across workspace updates
+		deterministicSeed := fmt.Sprintf("%s_chunk_%d", path, idx)
+		hash := sha1.Sum([]byte(deterministicSeed))
+		id, _ := uuid.FromBytes(hash[:16])
+
+		points = append(points, &qdrant.PointStruct{
+			Id:      qdrant.NewIDUUID(id.String()),
+			Vectors: qdrant.NewVectors(vector...),
+			Payload: qdrant.NewValueMap(map[string]interface{}{
+				"file_path": path,
+				"content":   chunk,
+				"updated":   time.Now().Unix(),
+			}),
+		})
+	}
+
+	if len(points) > 0 {
+		_, err = iw.qdrantClient.Upsert(ctx, &qdrant.UpsertPoints{
+			CollectionName: iw.cfg.CollectionName,
+			Points:         points,
+		})
+		if err != nil {
+			log.Printf("gRPC Batch Upsert onto collection '%s' failed: %v", iw.cfg.CollectionName, err)
+		} else {
+			log.Printf("Successfully synchronized %d vectors for %s", len(points), path)
+		}
+	}
+}
+
+func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, path string) error {
+	_, err := iw.qdrantClient.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: iw.cfg.CollectionName,
+		// The client uses Points directly now, which maps to a points selector.
+		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewMatchKeyword("file_path", path),
+			},
+		}),
+	})
+	return err
+}
+
+func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string) ([]float32, error) {
+	payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.cfg.EmbeddingModel, Prompt: text})
+	req, _ := http.NewRequestWithContext(ctx, "POST", iw.cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := iw.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var out OllamaEmbedResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Embedding, nil
+}
+
+func (iw *IngestionWorker) chunkText(text string, size int) []string {
+	// Basic sliding/line chunking engine
+	lines := strings.Split(text, "\n")
+	var chunks []string
+	var currentChunk strings.Builder
+
+	for _, line := range lines {
+		if currentChunk.Len()+len(line) > size {
+			chunks = append(chunks, currentChunk.String())
+			currentChunk.Reset()
+		}
+		currentChunk.WriteString(line + "\n")
+	}
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+	return chunks
+}
+
+// --- Basic MCP Transport Subsystem ---
+type MCPRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	ID      json.RawMessage `json:"id,omitempty"`
+}
+
+func (iw *IngestionWorker) listenToMCPClient(ctx context.Context) {
+	dec := json.NewDecoder(os.Stdin)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			var req MCPRequest
+			if err := dec.Decode(&req); err != nil {
+				if err == io.EOF {
+					return
+				}
+				continue
+			}
+			// Route base protocol signals (e.g. initialize, tools/list)
+			iw.handleMCPMethod(req)
+		}
+	}
+}
+
+func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
+	// Maintain standard MCP initialization responses out to client
+	if req.Method == "initialize" {
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]interface{}{},
+				"serverInfo": map[string]string{
+					"name":    "go-qdrant-sync-mcp",
+					"version": "1.0.0",
+				},
+			},
+		}
+		out, _ := json.Marshal(response)
+		fmt.Println(string(out))
+	}
+}
