@@ -128,6 +128,34 @@ Add the following block to your `claude_desktop_config.json` (typically located 
 
 ---
 
+## 📚 Codex / Knowledge Base Setup
+
+Many developers maintain local documentation, architecture guidelines, team handbooks, or a personal knowledge base inside their repository or workspace using folders like `.codex` or `.obsidian`. 
+
+By default, the server ignores all hidden directories (those starting with a `.`) to prevent performance bottlenecks. You can explicitly instruct the server to monitor, index, and query your Codex notes by adding `.codex` or `.obsidian` to the `INCLUDE_HIDDEN_DIRS` environment variable.
+
+### Setup Example
+
+Simply append your documentation directory to the `INCLUDE_HIDDEN_DIRS` variable in your MCP configuration:
+
+```json
+"env": {
+  "WATCH_DIRECTORY": "/home/user/Workspace/my-project",
+  "INCLUDE_HIDDEN_DIRS": ".codex,.obsidian",
+  "QDRANT_COLLECTION": "my-project-vectors",
+  "OLLAMA_HOST": "http://127.0.0.1:11434",
+  "EMBEDDING_MODEL": "nomic-embed-text"
+}
+```
+
+### 🧠 Benefits of indexing your Codex
+Once configured, the MCP server automatically chunks and indexes your `.codex/*.md` documentation alongside your codebase. Your AI coding assistants can use the `qdrant_search` tool to:
+* **Lookup Internal Design Guides:** *"Find the guidelines for writing telemetry logs."*
+* **Retrieve Architecture Schemas:** *"What is the database connection strategy documented in the wiki?"*
+* **Reference Feature Specifications:** *"How should the new user-onboarding flows behave according to our Codex specs?"*
+
+---
+
 ## 🛠️ Provided Tools
 
 ### `qdrant_search`
