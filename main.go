@@ -23,42 +23,57 @@ import (
 
 // --- Configuration Struct ---
 type Config struct {
-	QdrantHost       string
-	QdrantPort       int
-	CollectionName   string
-	WatchDirectory   string
-	OllamaHost       string
-	EmbeddingModel   string
-	DebounceDuration time.Duration
+	QdrantHost        string
+	QdrantPort        int
+	CollectionName    string
+	WatchDirectory    string
+	OllamaHost        string
+	EmbeddingModel    string
+	DebounceDuration  time.Duration
+	ExcludeDirs       []string
+	IncludeHiddenDirs []string
 }
 
 func loadConfig() Config {
-	// Parse network boundaries using your specified environment keys
 	host := os.Getenv("QDRANT_HOST")
 	if host == "" {
-		// Fallback parse if full URL was given (e.g. http://172.20.0.5:6334)
-		urlEnv := os.Getenv("QDRANT_URL")
-		if strings.Contains(urlEnv, "172.20.0.5") {
-			host = "172.20.0.5"
-		} else {
-			host = "127.0.0.1"
-		}
+		host = "172.20.0.5"
 	}
 
-	model := os.Getenv("EMBEDDING_MODEL")
-	if model == "" {
-		model = "nomic-embed-text"
+	// Helper function to turn comma-separated string arrays into Go slices cleanly
+	parseEnvArray := func(key string) []string {
+		val := os.Getenv(key)
+		if val == "" {
+			return []string{}
+		}
+		items := strings.Split(val, ",")
+		for i, item := range items {
+			items[i] = strings.TrimSpace(item)
+		}
+		return items
 	}
 
 	return Config{
-		QdrantHost:       host,
-		QdrantPort:       6334, // High-performance gRPC port mapping
-		CollectionName:   os.Getenv("QDRANT_COLLECTION"),
-		WatchDirectory:   os.Getenv("WATCH_DIRECTORY"),
-		OllamaHost:       os.Getenv("OLLAMA_HOST"),
-		EmbeddingModel:   model,
-		DebounceDuration: 800 * time.Millisecond, // Mitigate rapid IDE auto-saves
+		QdrantHost:        host,
+		QdrantPort:        6334,
+		CollectionName:    os.Getenv("QDRANT_COLLECTION"),
+		WatchDirectory:    os.Getenv("WATCH_DIRECTORY"),
+		OllamaHost:        os.Getenv("OLLAMA_HOST"),
+		EmbeddingModel:    os.Getenv("EMBEDDING_MODEL"),
+		DebounceDuration:  800 * time.Millisecond,
+		ExcludeDirs:       parseEnvArray("EXCLUDE_DIRS"),
+		IncludeHiddenDirs: parseEnvArray("INCLUDE_HIDDEN_DIRS"),
 	}
+}
+
+// Helper to look up specific slice elements quickly
+func sliceContains(slice []string, match string) bool {
+	for _, item := range slice {
+		if item == match {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Ingestion Structural Blocks ---
@@ -89,8 +104,9 @@ func main() {
 
 	// Connect to home lab Qdrant via fast gRPC
 	client, err := qdrant.NewClient(&qdrant.Config{
-		Host: cfg.QdrantHost,
-		Port: cfg.QdrantPort,
+		Host:                   cfg.QdrantHost,
+		Port:                   cfg.QdrantPort,
+		SkipCompatibilityCheck: true,
 	})
 	if err != nil {
 		log.Fatalf("Failed to establish Qdrant connection: %v", err)
@@ -123,10 +139,26 @@ func main() {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() {
-			if strings.Contains(path, ".git") || strings.Contains(path, "node_modules") {
+			base := d.Name()
+
+			// 1. Drop standard target blacklisted directory paths (e.g. node_modules)
+			if sliceContains(cfg.ExcludeDirs, base) {
 				return filepath.SkipDir
 			}
+
+			// 2. Evaluate general hidden folder directory paths
+			if strings.HasPrefix(base, ".") && base != "." {
+				// If it explicitly lives in your inclusion array, step in and watch it
+				if sliceContains(cfg.IncludeHiddenDirs, base) {
+					log.Printf("Dynamic Filter: Watching explicit config directory: %s", path)
+					return watcher.Add(path)
+				}
+				// Otherwise skip it (.git, .obsidian, .codex)
+				return filepath.SkipDir
+			}
+
 			return watcher.Add(path)
 		}
 		return nil
@@ -157,11 +189,28 @@ func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watc
 			if !ok {
 				return
 			}
+
+			baseName := filepath.Base(event.Name)
+
+			// Dynamically determine if the event path matches any allowed hidden folder patterns
+			isAllowedHiddenPath := false
+			for _, allowedDir := range iw.cfg.IncludeHiddenDirs {
+				if strings.Contains(event.Name, "/"+allowedDir+"/") {
+					isAllowedHiddenPath = true
+					break
+				}
+			}
+
+			// Guard against general hidden files unless they belong to an explicitly allowed tree
+			if (strings.HasPrefix(baseName, ".") && !isAllowedHiddenPath) ||
+				strings.HasPrefix(baseName, "~") ||
+				strings.HasSuffix(baseName, ".tmp") {
+				continue
+			}
+
 			// Focus explicitly on functional mutation blocks
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
-				if !strings.Contains(event.Name, "~") && !strings.HasSuffix(event.Name, ".tmp") {
-					eventChan <- event.Name
-				}
+				eventChan <- event.Name
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
