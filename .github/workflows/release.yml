@@ -1,0 +1,131 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g., v1.0.0)'
+        required: true
+        type: string
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  test_and_verify:
+    name: Test & Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Verify Dependencies
+        run: go mod verify
+
+      - name: Verify Build
+        run: go build -v ./...
+
+      - name: Run Tests
+        run: go test -v ./...
+
+  build_matrix:
+    name: Build Binaries
+    needs: test_and_verify
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Build Binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          BINARY_NAME="qdrant-mcp-server"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="qdrant-mcp-server.exe"
+          fi
+          
+          # Inject version input into main.Version using -ldflags
+          go build -v -ldflags="-X main.Version=${{ github.event.inputs.version }} -s -w" -o "dist/${BINARY_NAME}" .
+          
+          # Compress binary for distribution
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "qdrant-mcp-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "${BINARY_NAME}"
+            rm "${BINARY_NAME}"
+          else
+            tar -czf "qdrant-mcp-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "${BINARY_NAME}"
+            rm "${BINARY_NAME}"
+          fi
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 1
+
+  create_release:
+    name: Publish Release
+    needs: build_matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Tag and Push Git Release
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          VERSION="${{ github.event.inputs.version }}"
+          
+          # Check if tag already exists on remote
+          if git ls-remote --tags origin | grep -q "refs/tags/${VERSION}"; then
+            echo "Tag ${VERSION} already exists on origin. Reusing existing tag."
+          else
+            echo "Creating and pushing tag ${VERSION}..."
+            git tag -a "${VERSION}" -m "Release ${VERSION}"
+            git push origin "${VERSION}"
+          fi
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Release ${{ github.event.inputs.version }}
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

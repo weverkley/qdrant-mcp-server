@@ -24,6 +24,9 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 )
 
+// Version is the current version of the MCP server, injected during the build.
+var Version = "1.0.0"
+
 // --- Configuration Struct ---
 type Config struct {
 	QdrantHost        string
@@ -423,7 +426,7 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		// Call Ollama to determine embedding dimension size dynamically
 		dummyVector, err := iw.fetchRemoteEmbedding(ctx, "hello")
 		if err != nil {
-			return 0, fmt.Errorf("failed to fetch dummy embedding from Ollama model '%s' at %s: %w", 
+			return 0, fmt.Errorf("failed to fetch dummy embedding from Ollama model '%s' at %s: %w",
 				iw.cfg.EmbeddingModel, iw.cfg.OllamaHost, err)
 		}
 		dimension := uint64(len(dummyVector))
@@ -577,7 +580,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 				},
 				"serverInfo": map[string]string{
 					"name":    "go-qdrant-sync-mcp",
-					"version": "1.0.0",
+					"version": Version,
 				},
 			},
 		}
