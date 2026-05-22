@@ -72,11 +72,25 @@ The server relies on the following environment variables for its configuration:
 
 ---
 
-## 🚀 Compilation & Installation
+## 🚀 Installation & Compilation
 
+### Direct One-Line Installation
+If you simply want to install the pre-compiled binary on your client machine (supports Linux, macOS, and Windows/WSL), you can run the following command directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/weverkley/qdrant-mcp-server/main/install.sh | sh
+```
+
+To install a specific version, pass the `VERSION` environment variable:
+```bash
+curl -fsSL https://raw.githubusercontent.com/weverkley/qdrant-mcp-server/main/install.sh | VERSION=v1.0.0 sh
+```
+
+---
+
+### Manual Compilation
 Ensure you have [Go](https://go.dev/doc/install) 1.25.0 or later installed.
 
-### 1. Build the Binary
 To compile the codebase into a single, high-performance static binary:
 
 ```bash
@@ -87,6 +101,43 @@ go build -ldflags="-s -w" -o ~/bin/qdrant-mcp-server main.go
 Alternatively, you can build directly to your working directory:
 ```bash
 go build -o qdrant-mcp-server main.go
+```
+
+---
+
+## 🎓 Installing Agent Skills
+
+To help your AI agent (like Cursor, Windsurf, Cline, or Copilot) understand when and how to use the semantic search capabilities, you can install specialized **skills** (rules files) directly into your workspace.
+
+Run the compiled server binary with the `list-skills` and `install-skill` subcommands:
+
+### 1. List Supported Skills
+```bash
+./qdrant-mcp-server list-skills
+```
+
+### 2. Install a Skill for an Agent
+Install the rules directly in your active project's root folder:
+```bash
+# Install Cursor rules (.cursorrules)
+./qdrant-mcp-server install-skill cursor
+
+# Install Cline rules (.clinerules)
+./qdrant-mcp-server install-skill cline
+
+# Install Copilot instructions (.github/copilot-instructions.md)
+./qdrant-mcp-server install-skill copilot
+
+# Install Codex instructions (.codex/mcp-instructions.md)
+./qdrant-mcp-server install-skill codex
+
+# Install ALL supported agent skills at once
+./qdrant-mcp-server install-skill all
+```
+
+You can also specify a custom target path as the last parameter:
+```bash
+./qdrant-mcp-server install-skill cursor /absolute/path/to/my-project
 ```
 
 ---
@@ -223,6 +274,30 @@ Retrieves the real-time status of the codebase vector ingestion pipeline, includ
 - `/home/user/Workspace/my-project/auth/middleware.go`
 - `/home/user/Workspace/my-project/models/user.go`
 ```
+
+---
+
+## 📦 Automated Releases & CI/CD
+
+This repository includes a fully automated release workflow powered by GitHub Actions. 
+
+### Triggering a Release
+The release process is manual and can be triggered at any time using GitHub's `workflow_dispatch`:
+
+1. Navigate to the **Actions** tab in your GitHub repository.
+2. Select the **Build and Release** workflow from the left sidebar.
+3. Click the **Run workflow** dropdown on the right.
+4. Input the target release version tag (e.g. `v1.0.0`) and click **Run workflow**.
+
+### What the Release Workflow Does:
+- **Verification**: Automatically checks Go module dependencies and runs the Go test suites before any builds are triggered.
+- **Cross-Compilation**: Compiles native binaries in parallel using a matrix strategy for multiple architectures:
+  - **Linux**: `amd64`, `arm64`
+  - **macOS (Darwin)**: `amd64`, `arm64`
+  - **Windows**: `amd64`
+- **Dynamic Versioning**: Injects the exact version tag inputted by the user at build time into the application binary using `-ldflags="-X main.Version=<VERSION> -s -w"`.
+- **Packaging**: Packs each compiled binary into `.tar.gz` archives (for Linux/macOS) and `.zip` archives (for Windows).
+- **GitHub Release & Assets**: Automatically checks if the git tag exists (creates and pushes it if it does not), creates a new public GitHub release, generates release notes from recent commit history, and attaches all compressed archives as downloadable assets.
 
 ---
 
