@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -92,6 +93,10 @@ type IngestionWorker struct {
 	cfg          Config
 	qdrantClient *qdrant.Client
 	httpClient   *http.Client
+	mu           sync.Mutex
+	pendingFiles map[string]time.Time
+	activeSyncs  int
+	totalSynced  int
 }
 
 type OllamaEmbedReq struct {
@@ -128,6 +133,7 @@ func main() {
 		cfg:          cfg,
 		qdrantClient: client,
 		httpClient:   &http.Client{Timeout: 15 * time.Second},
+		pendingFiles: make(map[string]time.Time),
 	}
 
 	// Boot active structural watcher
@@ -244,7 +250,24 @@ func (iw *IngestionWorker) ingestionConsumer(ctx context.Context, eventChan <-ch
 			if timer, exists := timers[path]; exists {
 				timer.Stop()
 			}
+
+			iw.mu.Lock()
+			iw.pendingFiles[path] = time.Now()
+			iw.mu.Unlock()
+
 			timers[path] = time.AfterFunc(iw.cfg.DebounceDuration, func() {
+				iw.mu.Lock()
+				delete(iw.pendingFiles, path)
+				iw.activeSyncs++
+				iw.mu.Unlock()
+
+				defer func() {
+					iw.mu.Lock()
+					iw.activeSyncs--
+					iw.totalSynced++
+					iw.mu.Unlock()
+				}()
+
 				iw.syncFileState(context.Background(), path)
 			})
 		}
@@ -449,6 +472,14 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 							"required": []string{"query"},
 						},
 					},
+					{
+						"name":        "get_sync_status",
+						"description": "Retrieve the real-time status of the codebase vector ingestion pipeline. Use this to check if files are still being indexed, how many files are queued for debouncing, and how many files have been successfully synchronized.",
+						"inputSchema": map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+					},
 				},
 			},
 		}
@@ -497,6 +528,52 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 				out, _ := json.Marshal(response)
 				fmt.Println(string(out))
 			}()
+		} else if params.Name == "get_sync_status" {
+			iw.mu.Lock()
+			status := "idle"
+			if len(iw.pendingFiles) > 0 || iw.activeSyncs > 0 {
+				status = "syncing"
+			}
+
+			pendingList := []string{}
+			for p := range iw.pendingFiles {
+				pendingList = append(pendingList, p)
+			}
+
+			pendingCount := len(iw.pendingFiles)
+			activeCount := iw.activeSyncs
+			totalCount := iw.totalSynced
+			iw.mu.Unlock()
+
+			// Format output nicely in Markdown
+			var sb strings.Builder
+			sb.WriteString("### 🔄 Code Ingestion Sync Status\n\n")
+			sb.WriteString(fmt.Sprintf("- **Status:** `%s`\n", status))
+			sb.WriteString(fmt.Sprintf("- **Queue Size (Debouncing):** `%d`\n", pendingCount))
+			sb.WriteString(fmt.Sprintf("- **Active Indexing Threads:** `%d`\n", activeCount))
+			sb.WriteString(fmt.Sprintf("- **Lifetime Synced Files:** `%d`\n", totalCount))
+
+			if len(pendingList) > 0 {
+				sb.WriteString("\n#### ⏳ Files Currently in Debounce Queue:\n")
+				for _, p := range pendingList {
+					sb.WriteString(fmt.Sprintf("- `%s`\n", p))
+				}
+			}
+
+			response := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": sb.String(),
+						},
+					},
+				},
+			}
+			out, _ := json.Marshal(response)
+			fmt.Println(string(out))
 		} else {
 			iw.sendMCPError(req.ID, -32601, "Requested tool execution target not found")
 		}

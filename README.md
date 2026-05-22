@@ -197,6 +197,35 @@ func ValidateCustomClaims(tokenString string) (*Claims, error) {
 
 ---
 
+### `get_sync_status`
+Retrieves the real-time status of the codebase vector ingestion pipeline, including the status state, pending queue size, active indexing threads, and the total count of successfully synced files during the session lifecycle.
+
+**Arguments:**
+*None*
+
+**Example Client Call:**
+```json
+{
+  "name": "get_sync_status"
+}
+```
+
+**Markdown Response Structure:**
+```markdown
+### 🔄 Code Ingestion Sync Status
+
+- **Status:** `syncing`
+- **Queue Size (Debouncing):** `2`
+- **Active Indexing Threads:** `1`
+- **Lifetime Synced Files:** `24`
+
+#### ⏳ Files Currently in Debounce Queue:
+- `/home/user/Workspace/my-project/auth/middleware.go`
+- `/home/user/Workspace/my-project/models/user.go`
+```
+
+---
+
 ## 📜 License
 
 [MIT License](LICENSE)
