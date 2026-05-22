@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
@@ -40,6 +42,15 @@ func loadConfig() Config {
 		host = "172.20.0.5"
 	}
 
+	port := 6334
+	if portStr := os.Getenv("QDRANT_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			port = p
+		} else {
+			log.Printf("Warning: QDRANT_PORT '%s' is not a valid integer, falling back to default 6334", portStr)
+		}
+	}
+
 	// Helper function to turn comma-separated string arrays into Go slices cleanly
 	parseEnvArray := func(key string) []string {
 		val := os.Getenv(key)
@@ -55,7 +66,7 @@ func loadConfig() Config {
 
 	return Config{
 		QdrantHost:        host,
-		QdrantPort:        6334,
+		QdrantPort:        port,
 		CollectionName:    os.Getenv("QDRANT_COLLECTION"),
 		WatchDirectory:    os.Getenv("WATCH_DIRECTORY"),
 		OllamaHost:        os.Getenv("OLLAMA_HOST"),
@@ -547,19 +558,7 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 		}
 
 		// Detect target language parsing extensions for beautiful Markdown injection blocks
-		ext := filepath.Ext(filePath)
-		lang := "text"
-		if ext == ".cs" {
-			lang = "csharp"
-		} else if ext == ".xaml" || ext == ".xml" {
-			lang = "xml"
-		} else if ext == ".ts" || ext == ".tsx" {
-			lang = "typescript"
-		} else if ext == ".js" || ext == ".jsx" {
-			lang = "javascript"
-		} else if ext == ".json" {
-			lang = "json"
-		}
+		lang := detectLanguage(filePath)
 
 		sb.WriteString(fmt.Sprintf("#### [%d] Source File: %s (Match Score: %.2f)\n", i+1, filePath, point.Score))
 		sb.WriteString(fmt.Sprintf("```%s\n", lang))
@@ -571,4 +570,31 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 	}
 
 	return sb.String(), nil
+}
+
+func detectLanguage(filePath string) string {
+	lexer := lexers.Match(filePath)
+	if lexer != nil {
+		config := lexer.Config()
+		if len(config.Aliases) > 0 && config.Aliases[0] != "text" {
+			return config.Aliases[0]
+		}
+	}
+
+	// Custom fallbacks
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".xaml", ".xml", ".csproj", ".fsproj", ".sln":
+		return "xml"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".js", ".jsx":
+		return "javascript"
+	case ".md", ".markdown":
+		return "markdown"
+	case "":
+		return "text"
+	default:
+		return strings.TrimPrefix(ext, ".")
+	}
 }

@@ -3,9 +3,14 @@ module qdrant-mcp-server
 go 1.25.0
 
 require (
-	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/qdrant/go-client v1.18.1 // indirect
+	github.com/alecthomas/chroma/v2 v2.24.1
+	github.com/fsnotify/fsnotify v1.10.1
+	github.com/google/uuid v1.6.0
+	github.com/qdrant/go-client v1.18.1
+)
+
+require (
+	github.com/dlclark/regexp2 v1.12.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
