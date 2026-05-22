@@ -358,10 +358,21 @@ func (iw *IngestionWorker) chunkText(text string, size int) []string {
 }
 
 // --- Basic MCP Transport Subsystem ---
+// --- Enhanced MCP Protocol Structural Blocks ---
 type MCPRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Method  string          `json:"method"`
 	ID      json.RawMessage `json:"id,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type CallToolParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type SearchArguments struct {
+	Query string `json:"query"`
 }
 
 func (iw *IngestionWorker) listenToMCPClient(ctx context.Context) {
@@ -385,14 +396,16 @@ func (iw *IngestionWorker) listenToMCPClient(ctx context.Context) {
 }
 
 func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
-	// Maintain standard MCP initialization responses out to client
+	// 1. Connection Handshake Protocol Block
 	if req.Method == "initialize" {
 		response := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      req.ID,
 			"result": map[string]interface{}{
 				"protocolVersion": "2024-11-05",
-				"capabilities":    map[string]interface{}{},
+				"capabilities": map[string]interface{}{
+					"tools": map[string]interface{}{},
+				},
 				"serverInfo": map[string]string{
 					"name":    "go-qdrant-sync-mcp",
 					"version": "1.0.0",
@@ -401,5 +414,161 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 		}
 		out, _ := json.Marshal(response)
 		fmt.Println(string(out))
+		return
 	}
+
+	// 2. Capabilities Protocol Declaration Block
+	if req.Method == "tools/list" {
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{
+						"name":        "qdrant_search",
+						"description": "Search your local codebases via semantic vector queries hosted on your home lab server. Use this to find implementation patterns, look up technical definitions, or trace structural business logic context.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"query": map[string]interface{}{
+									"type":        "string",
+									"description": "The explicit semantic search query string (e.g., 'JWT authentication filter middleware' or 'WPF custom control XAML templates').",
+								},
+							},
+							"required": []string{"query"},
+						},
+					},
+				},
+			},
+		}
+		out, _ := json.Marshal(response)
+		fmt.Println(string(out))
+		return
+	}
+
+	// 3. Execution Processing Block (The Upgrade)
+	if req.Method == "tools/call" {
+		var params CallToolParams
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			iw.sendMCPError(req.ID, -32602, "Invalid tool call parameters")
+			return
+		}
+
+		if params.Name == "qdrant_search" {
+			var args SearchArguments
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				iw.sendMCPError(req.ID, -32602, "Invalid search arguments format")
+				return
+			}
+
+			// Process the RAG search query across the local network interface
+			go func() {
+				resultsText, err := iw.executeVectorSearch(context.Background(), args.Query)
+				if err != nil {
+					log.Printf("Internal RAG search failed: %v", err)
+					iw.sendMCPError(req.ID, -32603, fmt.Sprintf("Search execution error: %v", err))
+					return
+				}
+
+				// Respond directly to the active IDE context stream window
+				response := map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      req.ID,
+					"result": map[string]interface{}{
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": resultsText,
+							},
+						},
+					},
+				}
+				out, _ := json.Marshal(response)
+				fmt.Println(string(out))
+			}()
+		} else {
+			iw.sendMCPError(req.ID, -32601, "Requested tool execution target not found")
+		}
+		return
+	}
+}
+
+// Helper tool to safely write standardized JSON-RPC protocol error contexts
+func (iw *IngestionWorker) sendMCPError(id json.RawMessage, code int, message string) {
+	response := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+		},
+	}
+	out, _ := json.Marshal(response)
+	fmt.Println(string(out))
+}
+
+func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string) (string, error) {
+	// Step A: Vectorize the search query using your home lab Ollama endpoint
+	vector, err := iw.fetchRemoteEmbedding(ctx, query)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
+	}
+
+	// Step B: Direct a high-speed gRPC Query request to your Qdrant collection
+	// Retrieve top 5 closest matching context code sheets
+	queryResponse, err := iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: iw.cfg.CollectionName,
+		Query:          qdrant.NewQueryDense(vector),
+		Limit:          qdrant.PtrOf(uint64(5)),
+		WithPayload:    qdrant.NewWithPayloadEnable(true), // Ensure code text comes back
+	})
+	if err != nil {
+		return "", fmt.Errorf("qdrant search operation failed: %w", err)
+	}
+
+	if len(queryResponse) == 0 {
+		return "No relevant structural code blocks or reference components were found matching your query scope.", nil
+	}
+
+	// Step C: Marshal points cleanly into an aggregate Markdown context layout
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Core Codebase Reference Snippets for: \"%s\"\n\n", query))
+
+	for i, point := range queryResponse {
+		payloadMap := point.Payload
+		filePath := "Unknown Location"
+		contentChunk := "Empty Source"
+
+		if pathVal, exists := payloadMap["file_path"]; exists {
+			filePath = pathVal.GetStringValue()
+		}
+		if contentVal, exists := payloadMap["content"]; exists {
+			contentChunk = contentVal.GetStringValue()
+		}
+
+		// Detect target language parsing extensions for beautiful Markdown injection blocks
+		ext := filepath.Ext(filePath)
+		lang := "text"
+		if ext == ".cs" {
+			lang = "csharp"
+		} else if ext == ".xaml" || ext == ".xml" {
+			lang = "xml"
+		} else if ext == ".ts" || ext == ".tsx" {
+			lang = "typescript"
+		} else if ext == ".js" || ext == ".jsx" {
+			lang = "javascript"
+		} else if ext == ".json" {
+			lang = "json"
+		}
+
+		sb.WriteString(fmt.Sprintf("#### [%d] Source File: %s (Match Score: %.2f)\n", i+1, filePath, point.Score))
+		sb.WriteString(fmt.Sprintf("```%s\n", lang))
+		sb.WriteString(contentChunk)
+		if !strings.HasSuffix(contentChunk, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("```\n\n")
+	}
+
+	return sb.String(), nil
 }
