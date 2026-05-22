@@ -91,6 +91,43 @@ go build -o qdrant-mcp-server main.go
 
 ---
 
+## 🎓 Installing Agent Skills
+
+To help your AI agent (like Cursor, Windsurf, Cline, or Copilot) understand when and how to use the semantic search capabilities, you can install specialized **skills** (rules files) directly into your workspace.
+
+Run the compiled server binary with the `list-skills` and `install-skill` subcommands:
+
+### 1. List Supported Skills
+```bash
+./qdrant-mcp-server list-skills
+```
+
+### 2. Install a Skill for an Agent
+Install the rules directly in your active project's root folder:
+```bash
+# Install Cursor rules (.cursorrules)
+./qdrant-mcp-server install-skill cursor
+
+# Install Cline rules (.clinerules)
+./qdrant-mcp-server install-skill cline
+
+# Install Copilot instructions (.github/copilot-instructions.md)
+./qdrant-mcp-server install-skill copilot
+
+# Install Codex instructions (.codex/mcp-instructions.md)
+./qdrant-mcp-server install-skill codex
+
+# Install ALL supported agent skills at once
+./qdrant-mcp-server install-skill all
+```
+
+You can also specify a custom target path as the last parameter:
+```bash
+./qdrant-mcp-server install-skill cursor /absolute/path/to/my-project
+```
+
+---
+
 ## 🔌 Integration with MCP Clients
 
 To use this server with your favorite AI agent tool, add it to your client's MCP configuration settings.

@@ -111,6 +111,36 @@ type OllamaEmbedResp struct {
 func main() {
 	// Setup localized logs redirected away from stdout to keep MCP channel clean
 	log.SetOutput(os.Stderr)
+
+	// Intercept command line arguments for skill generation
+	if len(os.Args) > 1 {
+		cmd := strings.ToLower(os.Args[1])
+		switch cmd {
+		case "list-skills", "-list", "--list":
+			ListSkills()
+			return
+		case "install-skill", "-install", "--install", "install":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Error: missing agent name.")
+				fmt.Fprintln(os.Stderr, "Usage: qdrant-mcp-server install-skill <agent|all> [destination_directory]")
+				os.Exit(1)
+			}
+			agent := os.Args[2]
+			destDir := ""
+			if len(os.Args) > 3 {
+				destDir = os.Args[3]
+			}
+			if err := InstallSkill(agent, destDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Error installing skill: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "help", "-h", "--help":
+			printCLIHelp()
+			return
+		}
+	}
+
 	log.Println("Starting Go Qdrant-RAG MCP Server...")
 
 	cfg := loadConfig()
@@ -674,4 +704,28 @@ func detectLanguage(filePath string) string {
 	default:
 		return strings.TrimPrefix(ext, ".")
 	}
+}
+
+func printCLIHelp() {
+	fmt.Println("\n==================================================================")
+	fmt.Println("🤖 Go Qdrant-RAG MCP Server CLI")
+	fmt.Println("==================================================================")
+	fmt.Println("A Model Context Protocol server that implements real-time codebase")
+	fmt.Println("semantic search using Qdrant & Ollama.")
+	fmt.Println()
+	fmt.Println("\x1b[1;33mCommands:\x1b[0m")
+	fmt.Println("  (no arguments)                 Starts the active MCP server.")
+	fmt.Println("  list-skills                    List all available AI agent skills.")
+	fmt.Println("  install-skill <agent> [dir]    Installs the rules file for the specified agent.")
+	fmt.Println("                                 Options: cursor, windsurf, cline, copilot, generic, codex, all.")
+	fmt.Println("  help, -h, --help               Show this help information.")
+	fmt.Println()
+	fmt.Println("\x1b[1;33mConfiguration via Environment Variables:\x1b[0m")
+	fmt.Println("  QDRANT_HOST         Qdrant hostname/IP (default: 172.20.0.5)")
+	fmt.Println("  QDRANT_PORT         Qdrant gRPC port (default: 6334)")
+	fmt.Println("  QDRANT_COLLECTION   Collection name for vectors (Required)")
+	fmt.Println("  WATCH_DIRECTORY     Directory to recursively monitor & index (Required)")
+	fmt.Println("  OLLAMA_HOST         Ollama API URL (Required)")
+	fmt.Println("  EMBEDDING_MODEL     Ollama model for embeddings (Required)")
+	fmt.Println("==================================================================")
 }
