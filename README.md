@@ -153,7 +153,7 @@ Add the following block to your `claude_desktop_config.json` (typically located 
 {
   "mcpServers": {
     "qdrant-rag": {
-      "command": "/absolute/path/to/bin/qdrant-mcp-server",
+      "command": "/usr/local/bin/qdrant-mcp-server",
       "env": {
         "QDRANT_HOST": "172.20.0.5",
         "QDRANT_COLLECTION": "my-codebase-collection",
@@ -168,13 +168,17 @@ Add the following block to your `claude_desktop_config.json` (typically located 
 }
 ```
 
+> [!NOTE]
+> - **Direct Installer**: If you installed using the one-line `curl` command, the path is `/usr/local/bin/qdrant-mcp-server` (or `/home/<username>/.local/bin/qdrant-mcp-server` if installed as a non-root fallback).
+> - **Manual Compilation**: If you compiled it manually, specify the path where you saved the binary (e.g., `/home/<username>/bin/qdrant-mcp-server` or the absolute path to your working directory build).
+
 ### Cursor & Windsurf Integration
 1. Open your editor settings.
 2. Navigate to **MCP** or **Model Context Protocol** settings.
 3. Click **Add New MCP Server**.
 4. Set the Type to `command` (or `stdio`).
 5. Provide a name: `qdrant-rag`.
-6. Provide the command command: `/absolute/path/to/bin/qdrant-mcp-server`.
+6. Provide the command: `/usr/local/bin/qdrant-mcp-server` (update this path to match your installation path: `/usr/local/bin/qdrant-mcp-server`, `/home/<username>/.local/bin/qdrant-mcp-server`, or `/home/<username>/bin/qdrant-mcp-server` depending on how you installed or built it).
 7. Configure the environment variables list as shown in the JSON schema above.
 
 ---
