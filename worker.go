@@ -447,6 +447,13 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 		// Detect target language parsing extensions for beautiful Markdown injection blocks
 		lang := detectLanguage(filePath)
 
+		var lastSyncedStr string
+		if uVal, exists := payloadMap["updated"]; exists {
+			lastSyncedStr = time.Unix(uVal.GetIntegerValue(), 0).Format("2006-01-02 15:04:05")
+		} else {
+			lastSyncedStr = "Unknown"
+		}
+
 		if typeStr == "function" {
 			nameVal := ""
 			if nVal, exists := payloadMap["name"]; exists {
@@ -466,9 +473,9 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 			}
 
 			if receiverVal != "" {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) (Match Score: %.2f)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, point.Score))
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, point.Score, lastSyncedStr))
 			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) (Match Score: %.2f)\n", i+1, nameVal, filePath, startLine, endLine, point.Score))
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, point.Score, lastSyncedStr))
 			}
 		} else if typeStr == "doc_chunk" {
 			pageVal := int64(0)
@@ -476,12 +483,12 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 				pageVal = pVal.GetIntegerValue()
 			}
 			if pageVal > 0 {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s (Match Score: %.2f)\n", i+1, pageVal, filePath, point.Score))
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, point.Score, lastSyncedStr))
 			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s (Match Score: %.2f)\n", i+1, filePath, point.Score))
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, point.Score, lastSyncedStr))
 			}
 		} else {
-			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f)\n", i+1, filePath, point.Score))
+			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, point.Score, lastSyncedStr))
 		}
 
 		sb.WriteString(fmt.Sprintf("```%s\n", lang))

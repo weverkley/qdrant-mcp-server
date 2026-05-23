@@ -246,14 +246,14 @@ The tool generates a rich, aggregated Markdown response containing up to 5 match
 ````markdown
 ### Core Codebase Reference Snippets for: "JWT token parsing middleware with custom claim validation"
 
-#### [1] Function: `ValidateCustomClaims` in /home/user/Workspace/my-project/auth/middleware.go (Lines 12-32) (Match Score: 0.92)
+#### [1] Function: `ValidateCustomClaims` in /home/user/Workspace/my-project/auth/middleware.go (Lines 12-32) (Match Score: 0.92 | Last Synced: 2026-05-23 09:28:10)
 ```go
 func ValidateCustomClaims(tokenString string) (*Claims, error) {
     // ...
 }
 ```
 
-#### [2] Doc Chunk (Page/Section 3) in /home/user/Workspace/my-project/docs/auth-specs.md (Match Score: 0.88)
+#### [2] Doc Chunk (Page/Section 3) in /home/user/Workspace/my-project/docs/auth-specs.md (Match Score: 0.88 | Last Synced: 2026-05-23 09:28:10)
 ```markdown
 JWT token claims are validated against the current session lifecycle policy...
 ```

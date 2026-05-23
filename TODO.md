@@ -45,6 +45,8 @@ This document outlines the planned improvements, architectural enhancements, and
     * `start_line` / `end_line`: Allow the LLM client to direct the user to the exact lines matching the chunk.
     * `language`: Store explicit languages for quick client UI rendering filters.
     * `content_hash`: Compare SHA1 checksums of file contents to skip re-indexing if no change has actually occurred.
+- [x] **Last Synced Date/Time presentation**
+  - Present the last updated/synchronized timestamp of matched points to the agent during semantic searches to verify chronologic relevance.
 
 ---
 
