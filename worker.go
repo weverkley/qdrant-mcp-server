@@ -71,6 +71,11 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 		return
 	}
 
+	if isBinaryContent(content) {
+		log.Printf("Skipping binary file: %s", path)
+		return
+	}
+
 	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
 	_ = iw.purgeFileVectors(ctx, path)
 
@@ -152,7 +157,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectors(vector...),
-				Payload: qdrant.NewValueMap(payload),
+				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
 	} else if isDocParsed {
@@ -185,7 +190,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectors(vector...),
-				Payload: qdrant.NewValueMap(payload),
+				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
 	} else {
@@ -216,7 +221,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectors(vector...),
-				Payload: qdrant.NewValueMap(payload),
+				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
 	}
@@ -545,4 +550,33 @@ func convertStringSlice(slice []string) []interface{} {
 		res[i] = v
 	}
 	return res
+}
+
+func isBinaryContent(content []byte) bool {
+	limit := 1024
+	if len(content) < limit {
+		limit = len(content)
+	}
+	for i := 0; i < limit; i++ {
+		if content[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizePayload(payload map[string]interface{}) map[string]interface{} {
+	for k, v := range payload {
+		switch val := v.(type) {
+		case string:
+			payload[k] = strings.ToValidUTF8(val, "")
+		case []interface{}:
+			for i, elem := range val {
+				if s, ok := elem.(string); ok {
+					val[i] = strings.ToValidUTF8(s, "")
+				}
+			}
+		}
+	}
+	return payload
 }
