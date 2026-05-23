@@ -36,16 +36,28 @@ jobs:
         run: go test -v ./...
 
   build_matrix:
-    name: Build Binaries
+    name: Build Binaries (${{ matrix.goos }}, ${{ matrix.goarch }})
     needs: test_and_verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
+        include:
+          - goos: linux
+            goarch: amd64
+            os: ubuntu-latest
+          - goos: linux
             goarch: arm64
+            os: ubuntu-latest
+          - goos: darwin
+            goarch: amd64
+            os: macos-latest
+          - goos: darwin
+            goarch: arm64
+            os: macos-latest
+          - goos: windows
+            goarch: amd64
+            os: windows-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -56,17 +68,29 @@ jobs:
           go-version: '1.25.x'
           cache: true
 
+      - name: Install Cross Compiler (Linux ARM64 only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Build Binary
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
         run: |
           BINARY_NAME="qdrant-mcp-server"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="qdrant-mcp-server.exe"
           fi
           
-          # Inject version input into main.Version using -ldflags
+          # Set cross compiler for Linux ARM64
+          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC="aarch64-linux-gnu-gcc"
+          fi
+          
           go build -v -ldflags="-X main.Version=${{ github.event.inputs.version }} -s -w" -o "dist/${BINARY_NAME}" .
           
           # Compress binary for distribution
