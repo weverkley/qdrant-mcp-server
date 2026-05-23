@@ -20,6 +20,7 @@ type Config struct {
 	ExcludeDirs       []string
 	IncludeHiddenDirs []string
 	ParserMode        string // "code", "doc", or "full" (default)
+	MaxEmbeddingWorkers int    // maximum concurrent embedding workers (default: 5)
 }
 
 func loadConfig() Config {
@@ -58,17 +59,27 @@ func loadConfig() Config {
 		parserMode = "full"
 	}
 
+	maxWorkers := 5
+	if workerStr := os.Getenv("MAX_EMBEDDING_WORKERS"); workerStr != "" {
+		if w, err := strconv.Atoi(workerStr); err == nil && w > 0 {
+			maxWorkers = w
+		} else {
+			log.Printf("Warning: MAX_EMBEDDING_WORKERS '%s' is not a valid positive integer, falling back to default 5", workerStr)
+		}
+	}
+
 	return Config{
-		QdrantHost:        host,
-		QdrantPort:        port,
-		CollectionName:    os.Getenv("QDRANT_COLLECTION"),
-		WatchDirectory:    os.Getenv("WATCH_DIRECTORY"),
-		OllamaHost:        os.Getenv("OLLAMA_HOST"),
-		EmbeddingModel:    os.Getenv("EMBEDDING_MODEL"),
-		DebounceDuration:  800 * time.Millisecond,
-		ExcludeDirs:       parseEnvArray("EXCLUDE_DIRS"),
-		IncludeHiddenDirs: parseEnvArray("INCLUDE_HIDDEN_DIRS"),
-		ParserMode:        parserMode,
+		QdrantHost:          host,
+		QdrantPort:          port,
+		CollectionName:      os.Getenv("QDRANT_COLLECTION"),
+		WatchDirectory:      os.Getenv("WATCH_DIRECTORY"),
+		OllamaHost:          os.Getenv("OLLAMA_HOST"),
+		EmbeddingModel:      os.Getenv("EMBEDDING_MODEL"),
+		DebounceDuration:    800 * time.Millisecond,
+		ExcludeDirs:         parseEnvArray("EXCLUDE_DIRS"),
+		IncludeHiddenDirs:   parseEnvArray("INCLUDE_HIDDEN_DIRS"),
+		ParserMode:          parserMode,
+		MaxEmbeddingWorkers: maxWorkers,
 	}
 }
 

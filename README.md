@@ -50,6 +50,7 @@ graph TD
 ## ✨ Key Features
 
 - **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, and Python to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching.
+- **⚡ Concurrent Rate-Limited Ingestion:** Accelerates workspace indexing by walking and parsing files concurrently using Goroutines and `sync.WaitGroup` while preventing Ollama server overload via a configurable buffered semaphore pool (`MAX_EMBEDDING_WORKERS`).
 - **⚡ Real-Time Indexing:** Uses OS-level file notifications (`fsnotify`) to watch your code workspace recursively. Any write, create, or delete operation immediately reflects in your vector database.
 - **🛡️ Intelligent Ignoring & Filters:** Automatically avoids indexing large directories (like `node_modules` or `.git`) and temporary files. Includes configuration parameters to strictly exclude specific folders or whitelist particular hidden directories.
 - **⏱️ Debounced Processing:** Features a configurable debounce duration (defaulting to 800ms) to ensure file saving sequences or git pulls do not thrash system/network resources.
@@ -74,6 +75,7 @@ The server relies on the following environment variables for its configuration:
 | `EXCLUDE_DIRS` | Comma-separated directory names to ignore (e.g., `node_modules,vendor,dist`). | `""` | No |
 | `INCLUDE_HIDDEN_DIRS` | Comma-separated hidden folder names to explicitly watch (e.g., `.github,.cursor`). | `""` | No |
 | `PARSER_MODE` | Parsing mode: `code` (only AST), `doc` (only documents), or `full` (both). | `full` | No |
+| `MAX_EMBEDDING_WORKERS` | Max concurrent worker threads doing Ollama embeddings. | `5` | No |
 
 ---
 

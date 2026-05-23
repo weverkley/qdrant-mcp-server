@@ -66,6 +66,7 @@ func main() {
 				qdrantClient: client,
 				httpClient:   &http.Client{Timeout: 15 * time.Second},
 				pendingFiles: make(map[string]time.Time),
+				sem:          make(chan struct{}, cfg.MaxEmbeddingWorkers),
 			}
 
 			log.Println("Starting manual codebase ingestion...")
@@ -104,6 +105,7 @@ func main() {
 		qdrantClient: client,
 		httpClient:   &http.Client{Timeout: 15 * time.Second},
 		pendingFiles: make(map[string]time.Time),
+		sem:          make(chan struct{}, cfg.MaxEmbeddingWorkers),
 	}
 
 	// Boot active structural watcher
@@ -267,5 +269,6 @@ func printCLIHelp() {
 	fmt.Println("  OLLAMA_HOST         Ollama API URL (Required)")
 	fmt.Println("  EMBEDDING_MODEL     Ollama model for embeddings (Required)")
 	fmt.Println("  PARSER_MODE         Parsing mode: code, doc, or full (default: full)")
+	fmt.Println("  MAX_EMBEDDING_WORKERS  Max concurrent embedding worker threads (default: 5)")
 	fmt.Println("================================================================================")
 }

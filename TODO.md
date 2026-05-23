@@ -6,7 +6,7 @@ This document outlines the planned improvements, architectural enhancements, and
 
 ## ⚡ Performance & Ingestion Concurrency
 
-- [ ] **Rate-Limited Embedding Worker Pool**
+- [x] **Rate-Limited Embedding Worker Pool**
   - Implement a buffered worker pool (e.g., maximum concurrent workers controlled by a `MAX_EMBEDDING_WORKERS` environment variable).
   - Prevent local Ollama engine thrashing and timeout errors during bulk changes (like git branch switches or initial indexing).
 - [ ] **Initial Startup Synchronization Crawler**

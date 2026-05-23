@@ -30,6 +30,7 @@ type IngestionWorker struct {
 	pendingFiles map[string]time.Time
 	activeSyncs  int
 	totalSynced  int
+	sem          chan struct{} // semaphore to rate limit concurrent embedding workers
 }
 
 type OllamaEmbedReq struct {
@@ -42,6 +43,15 @@ type OllamaEmbedResp struct {
 }
 
 func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
+	if iw.sem != nil {
+		select {
+		case iw.sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		defer func() { <-iw.sem }()
+	}
+
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		log.Printf("File removed on dev machine, purging remote vectors: %s", path)
@@ -304,11 +314,17 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("error walking watch directory: %w", err)
 	}
 
-	log.Printf("Found %d files to ingest. Starting ingestion...", len(filesToIngest))
+	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), iw.cfg.MaxEmbeddingWorkers)
+	var wg sync.WaitGroup
 	for i, path := range filesToIngest {
-		log.Printf("[%d/%d] Ingesting %s...", i+1, len(filesToIngest), path)
-		iw.syncFileState(ctx, path)
+		wg.Add(1)
+		go func(idx int, p string) {
+			defer wg.Done()
+			log.Printf("[%d/%d] Ingesting %s...", idx+1, len(filesToIngest), p)
+			iw.syncFileState(ctx, p)
+		}(i, path)
 	}
+	wg.Wait()
 
 	return len(filesToIngest), nil
 }
