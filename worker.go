@@ -81,7 +81,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	ext := strings.ToLower(filepath.Ext(path))
 	extClean := strings.TrimPrefix(ext, ".")
 	relPath, _ := filepath.Rel(iw.cfg.WatchDirectory, path)
-	relDirs := getParentDirs(relPath)
+	relDirs := convertStringSlice(getParentDirs(relPath))
 	var points []*qdrant.PointStruct
 
 	// Determine file categories based on ParserMode
@@ -537,4 +537,12 @@ func getParentDirs(relPath string) []string {
 		dir = filepath.Dir(dir)
 	}
 	return dirs
+}
+
+func convertStringSlice(slice []string) []interface{} {
+	res := make([]interface{}, len(slice))
+	for i, v := range slice {
+		res[i] = v
+	}
+	return res
 }
