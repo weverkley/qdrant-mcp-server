@@ -223,13 +223,17 @@ Performs semantic vector-based searches across the entire watched workspace dire
 
 **Arguments:**
 - `query` (string, Required): The natural language query or concept you are searching for.
+- `file_extensions` (array of strings, Optional): Restrict search to specific extensions (e.g. `["go", "py"]`).
+- `path_prefix` (string, Optional): Restrict search to a specific directory (e.g. `src/auth`).
 
-**Example Client Call:**
+**Example Client Call (with Advanced Filtering):**
 ```json
 {
   "name": "qdrant_search",
   "arguments": {
-    "query": "JWT token parsing middleware with custom claim validation"
+    "query": "JWT token parsing middleware with custom claim validation",
+    "file_extensions": ["go"],
+    "path_prefix": "src/auth"
   }
 }
 ```

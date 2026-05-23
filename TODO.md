@@ -27,7 +27,7 @@ This document outlines the planned improvements, architectural enhancements, and
 
 ## 🔍 Advanced Querying & Filtering
 
-- [ ] **Metadata-Driven Filter Arguments**
+- [x] **Metadata-Driven Filter Arguments**
   - Enhance the `qdrant_search` tool parameters to accept optional filtering parameters:
     * `file_extensions` (e.g., limit queries to `.go` or `.cs`).
     * `path_prefix` (e.g., search strictly inside a `src/auth/` directory).

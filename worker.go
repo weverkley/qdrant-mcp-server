@@ -69,6 +69,9 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	}
 
 	ext := strings.ToLower(filepath.Ext(path))
+	extClean := strings.TrimPrefix(ext, ".")
+	relPath, _ := filepath.Rel(iw.cfg.WatchDirectory, path)
+	relDirs := getParentDirs(relPath)
 	var points []*qdrant.PointStruct
 
 	// Determine file categories based on ParserMode
@@ -120,14 +123,17 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			id, _ := uuid.FromBytes(hash[:16])
 
 			payload := map[string]interface{}{
-				"file_path":  path,
-				"content":    fn.Signature,
-				"type":       "function",
-				"name":       fn.Name,
-				"start_line": int64(fn.StartLine),
-				"end_line":   int64(fn.EndLine),
-				"language":   fn.Language,
-				"updated":    time.Now().Unix(),
+				"file_path":     path,
+				"content":       fn.Signature,
+				"type":          "function",
+				"name":          fn.Name,
+				"start_line":    int64(fn.StartLine),
+				"end_line":      int64(fn.EndLine),
+				"language":      fn.Language,
+				"extension":     extClean,
+				"relative_path": relPath,
+				"relative_dirs": relDirs,
+				"updated":       time.Now().Unix(),
 			}
 			if fn.Receiver != "" {
 				payload["receiver"] = fn.Receiver
@@ -153,11 +159,14 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			id, _ := uuid.FromBytes(hash[:16])
 
 			payload := map[string]interface{}{
-				"file_path": path,
-				"content":   chunk.Content,
-				"type":      "doc_chunk",
-				"hash":      chunk.Hash,
-				"updated":   time.Now().Unix(),
+				"file_path":     path,
+				"content":       chunk.Content,
+				"type":          "doc_chunk",
+				"hash":          chunk.Hash,
+				"extension":     extClean,
+				"relative_path": relPath,
+				"relative_dirs": relDirs,
+				"updated":       time.Now().Unix(),
 			}
 			if chunk.PageNumber > 0 {
 				payload["page_number"] = int64(chunk.PageNumber)
@@ -184,15 +193,20 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
+			payload := map[string]interface{}{
+				"file_path":     path,
+				"content":       chunk,
+				"type":          "chunk",
+				"extension":     extClean,
+				"relative_path": relPath,
+				"relative_dirs": relDirs,
+				"updated":       time.Now().Unix(),
+			}
+
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectors(vector...),
-				Payload: qdrant.NewValueMap(map[string]interface{}{
-					"file_path": path,
-					"content":   chunk,
-					"type":      "chunk",
-					"updated":   time.Now().Unix(),
-				}),
+				Payload: qdrant.NewValueMap(payload),
 			})
 		}
 	}
@@ -336,11 +350,43 @@ func (iw *IngestionWorker) chunkText(text string, size int) []string {
 	return chunks
 }
 
-func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string) (string, error) {
+func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string) (string, error) {
 	// Step A: Vectorize the search query using your home lab Ollama endpoint
 	vector, err := iw.fetchRemoteEmbedding(ctx, query)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
+	}
+
+	var filterConditions []*qdrant.Condition
+
+	// 1. File Extensions Filter (OR match across extensions)
+	if len(fileExtensions) > 0 {
+		var shouldMatch []*qdrant.Condition
+		for _, ext := range fileExtensions {
+			cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
+			shouldMatch = append(shouldMatch, qdrant.NewMatchKeyword("extension", cleanExt))
+		}
+		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Should: shouldMatch,
+		}))
+	}
+
+	// 2. Path Prefix Filter (matches relative path or any parent dir)
+	if pathPrefix != "" {
+		cleanPrefix := filepath.ToSlash(strings.TrimPrefix(pathPrefix, "/"))
+		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Should: []*qdrant.Condition{
+				qdrant.NewMatchKeyword("relative_path", cleanPrefix),
+				qdrant.NewMatchKeyword("relative_dirs", cleanPrefix),
+			},
+		}))
+	}
+
+	var qdrantFilter *qdrant.Filter
+	if len(filterConditions) > 0 {
+		qdrantFilter = &qdrant.Filter{
+			Must: filterConditions,
+		}
 	}
 
 	// Step B: Direct a high-speed gRPC Query request to your Qdrant collection
@@ -349,6 +395,7 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 		CollectionName: iw.cfg.CollectionName,
 		Query:          qdrant.NewQueryDense(vector),
 		Limit:          qdrant.PtrOf(uint64(5)),
+		Filter:         qdrantFilter,
 		WithPayload:    qdrant.NewWithPayloadEnable(true), // Ensure code text comes back
 	})
 	if err != nil {
@@ -457,4 +504,14 @@ func detectLanguage(filePath string) string {
 	default:
 		return strings.TrimPrefix(ext, ".")
 	}
+}
+
+func getParentDirs(relPath string) []string {
+	var dirs []string
+	dir := filepath.Dir(relPath)
+	for dir != "." && dir != "/" && dir != "" {
+		dirs = append(dirs, filepath.ToSlash(dir))
+		dir = filepath.Dir(dir)
+	}
+	return dirs
 }

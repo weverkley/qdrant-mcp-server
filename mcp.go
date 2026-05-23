@@ -24,7 +24,9 @@ type CallToolParams struct {
 }
 
 type SearchArguments struct {
-	Query string `json:"query"`
+	Query          string   `json:"query"`
+	FileExtensions []string `json:"file_extensions,omitempty"`
+	PathPrefix     string   `json:"path_prefix,omitempty"`
 }
 
 func (iw *IngestionWorker) listenToMCPClient(ctx context.Context) {
@@ -86,6 +88,17 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 									"type":        "string",
 									"description": "The explicit semantic search query string (e.g., 'JWT authentication filter middleware' or 'WPF custom control XAML templates').",
 								},
+								"file_extensions": map[string]interface{}{
+									"type": "array",
+									"items": map[string]interface{}{
+										"type": "string",
+									},
+									"description": "Optional list of file extensions to restrict the search to (e.g. ['go', 'py']).",
+								},
+								"path_prefix": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional path prefix to restrict the search to (e.g., 'src/auth').",
+								},
 							},
 							"required": []string{"query"},
 						},
@@ -131,7 +144,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 
 			// Process the RAG search query across the local network interface
 			go func() {
-				resultsText, err := iw.executeVectorSearch(context.Background(), args.Query)
+				resultsText, err := iw.executeVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix)
 				if err != nil {
 					log.Printf("Internal RAG search failed: %v", err)
 					iw.sendMCPError(req.ID, -32603, fmt.Sprintf("Search execution error: %v", err))
