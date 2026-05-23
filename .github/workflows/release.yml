@@ -96,7 +96,7 @@ jobs:
           # Compress binary for distribution
           cd dist
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip "qdrant-mcp-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "${BINARY_NAME}"
+            powershell -Command "Compress-Archive -Path '${BINARY_NAME}' -DestinationPath 'qdrant-mcp-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.zip'"
             rm "${BINARY_NAME}"
           else
             tar -czf "qdrant-mcp-server-${{ github.event.inputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "${BINARY_NAME}"
