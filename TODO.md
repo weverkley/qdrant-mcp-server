@@ -18,7 +18,7 @@ This document outlines the planned improvements, architectural enhancements, and
 
 ## 🧠 Semantic & AST-Aware Chunking
 
-- [ ] **Block & Structure-Aware Parser**
+- [x] **Block & Structure-Aware Parser**
   - Replace the basic 1000-character line accumulator with a parser that respects semantic boundaries.
   - Support syntax parsing blocks (e.g., class/function boundaries for Go, C#, JS/TS, Python) so that logical segments are not cut in half.
   - Handle Markdown structure (headers, list bounds) when indexing directories like `.codex` or `.obsidian`.
@@ -40,7 +40,7 @@ This document outlines the planned improvements, architectural enhancements, and
 
 ## 🏷️ Rich Metadata & Precision Navigation
 
-- [ ] **Positional Payload Fields**
+- [x] **Positional Payload Fields**
   - Extract and save precise positional indexes for code chunks in the payload:
     * `start_line` / `end_line`: Allow the LLM client to direct the user to the exact lines matching the chunk.
     * `language`: Store explicit languages for quick client UI rendering filters.

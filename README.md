@@ -19,8 +19,11 @@ graph TD
     %% Filesystem Ingestion Stream
     subgraph Ingestion ["Filesystem Real-time Ingestion"]
         A[Local Filesystem] -->|fsnotify Events| B[Debounce Queue - 800ms]
-        B -->|Read Changed File| C[Chunk Text - 1000 char blocks]
-        C -->|POST /api/embeddings| D[Ollama API]
+        B -->|Read Changed File| C{Is Code File?}
+        C -->|Yes| C1[Parse AST Functions & Imports]
+        C -->|No| C2[Chunk Text - 1000 char blocks]
+        C1 -->|Function Signatures/Bodies| D[Ollama API]
+        C2 -->|Raw Text Chunks| D
         D -->|Vector Embeddings| E[Qdrant gRPC client]
         E -->|gRPC Upsert / Delete| F[(Qdrant Vector Database)]
     end
@@ -46,6 +49,7 @@ graph TD
 
 ## ✨ Key Features
 
+- **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, and Python to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching.
 - **⚡ Real-Time Indexing:** Uses OS-level file notifications (`fsnotify`) to watch your code workspace recursively. Any write, create, or delete operation immediately reflects in your vector database.
 - **🛡️ Intelligent Ignoring & Filters:** Automatically avoids indexing large directories (like `node_modules` or `.git`) and temporary files. Includes configuration parameters to strictly exclude specific folders or whitelist particular hidden directories.
 - **⏱️ Debounced Processing:** Features a configurable debounce duration (defaulting to 800ms) to ensure file saving sequences or git pulls do not thrash system/network resources.
@@ -69,6 +73,7 @@ The server relies on the following environment variables for its configuration:
 | `EMBEDDING_MODEL` | The Ollama embedding model name (e.g., `nomic-embed-text`, `all-minilm`). | — | **Yes** |
 | `EXCLUDE_DIRS` | Comma-separated directory names to ignore (e.g., `node_modules,vendor,dist`). | `""` | No |
 | `INCLUDE_HIDDEN_DIRS` | Comma-separated hidden folder names to explicitly watch (e.g., `.github,.cursor`). | `""` | No |
+| `PARSER_MODE` | Parsing mode: `code` (only AST), `doc` (only documents), or `full` (both). | `full` | No |
 
 ---
 
@@ -230,23 +235,21 @@ Performs semantic vector-based searches across the entire watched workspace dire
 ```
 
 **Markdown Response Structure:**
-The tool generates a rich, aggregated Markdown response containing up to 5 matching codebase snippets, including match scores, absolute file paths, and syntax-highlighted code blocks for the appropriate programming language:
+The tool generates a rich, aggregated Markdown response containing up to 5 matching codebase snippets, recognizing and formatting AST function-level metadata (receivers, function names, line ranges) and structured document page numbers:
 
 ````markdown
 ### Core Codebase Reference Snippets for: "JWT token parsing middleware with custom claim validation"
 
-#### [1] Source File: /home/user/Workspace/my-project/auth/middleware.go (Match Score: 0.92)
+#### [1] Function: `ValidateCustomClaims` in /home/user/Workspace/my-project/auth/middleware.go (Lines 12-32) (Match Score: 0.92)
 ```go
-package auth
-
-import (
-    "github.com/golang-jwt/jwt/v5"
-    // ...
-)
-
 func ValidateCustomClaims(tokenString string) (*Claims, error) {
     // ...
 }
+```
+
+#### [2] Doc Chunk (Page/Section 3) in /home/user/Workspace/my-project/docs/auth-specs.md (Match Score: 0.88)
+```markdown
+JWT token claims are validated against the current session lifecycle policy...
 ```
 ````
 
