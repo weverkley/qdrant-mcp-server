@@ -93,6 +93,9 @@ To install a specific version, pass the `VERSION` environment variable:
 curl -fsSL https://raw.githubusercontent.com/weverkley/qdrant-mcp-server/main/install.sh | VERSION=v1.0.0 sh
 ```
 
+> [!TIP]
+> **Automated PATH Setup**: If the installer does not have write permissions to `/usr/local/bin`, it will fallback to installing in `~/.local/bin` and automatically append the path export to your shell configuration profile (`~/.bashrc`, `~/.zshrc`, `~/.profile`, or `~/.bash_profile`) so the CLI is immediately available after terminal restart.
+
 ---
 
 ### Manual Compilation
@@ -109,6 +112,53 @@ Alternatively, you can build directly to your working directory:
 ```bash
 go build -o qdrant-mcp-server main.go
 ```
+
+---
+
+## 🤖 Smart CLI & Manual Ingestion
+
+The `qdrant-mcp-server` binary itself is a highly functional command-line tool. While it is designed to run automatically as a background process via your AI editor, you can also run manual operations—like bulk codebase ingestion—directly from your shell.
+
+This is especially helpful when indexing extremely large codebases for the first time, as doing it in the background can sometimes feel slow or resource-intensive.
+
+### ⏱️ Auto-Discovery & Zero-Config CLI
+When running CLI subcommands (like `ingest`), the server automatically looks up your existing agent environment variables by searching upwards from the current working directory for configuration files:
+- `.mcp.json` / `mcp.json`
+- `.claude/settings.local.json`
+- `.codex/config.toml` / `config.toml`
+
+It also checks your user-level Claude settings file:
+- `~/.claude/settings.json`
+
+If it finds one of these configurations, it automatically parses it and loads the configured environment variables (like `QDRANT_COLLECTION`, `WATCH_DIRECTORY`, `OLLAMA_HOST`, and `EMBEDDING_MODEL`) into the active session. This means you can run manual ingestions inside your project folder with **zero manual configuration**!
+
+```bash
+# Simply navigate to your project and run:
+qdrant-mcp-server ingest
+```
+
+### 🎛️ Explicit CLI Overrides & Standalone Mode
+If you want to run the tool standalone, or override specific variables on the fly, you can pass command-line arguments (parameters):
+
+```bash
+# Explicitly set collection and directory to index
+qdrant-mcp-server ingest --collection my-custom-collection --watch-dir ./src --ollama http://localhost:11434
+
+# Use shorthand flags
+qdrant-mcp-server ingest -c my-collection -w ./ -o http://172.20.0.5:11434 -e nomic-embed-text
+```
+
+### 📋 Supported CLI Flags:
+- `--collection`, `-c <name>`: Qdrant collection name (`QDRANT_COLLECTION`)
+- `--watch-dir`, `-w <path>`: Directory to watch/index (`WATCH_DIRECTORY`)
+- `--ollama`, `-o <url>`: Ollama API URL (`OLLAMA_HOST`)
+- `--embedding`, `-e <model>`: Ollama embedding model (`EMBEDDING_MODEL`)
+- `--qdrant-host`, `-qh <host>`: Qdrant gRPC host (`QDRANT_HOST`)
+- `--qdrant-port`, `-qp <port>`: Qdrant gRPC port (`QDRANT_PORT`)
+- `--exclude-dirs`, `-xd <list>`: Comma-separated directory names to ignore (`EXCLUDE_DIRS`)
+- `--include-hidden-dirs`, `-ihd <list>`: Comma-separated hidden directories to watch (`INCLUDE_HIDDEN_DIRS`)
+- `--parser-mode`, `-pm <mode>`: Parsing mode: `code`, `doc`, or `full` (`PARSER_MODE`)
+- `--max-workers`, `-mw <number>`: Max concurrent embedding workers (`MAX_EMBEDDING_WORKERS`)
 
 ---
 

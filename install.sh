@@ -175,11 +175,47 @@ else
     case ":$PATH:" in
         *:"$INSTALL_DIR":*) ;;
         *)
-            log_warning "The directory ${INSTALL_DIR} is not in your PATH."
-            log_warning "To run it directly, add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:${INSTALL_DIR}\""
+            ADDED_TO_PROFILE=false
+            
+            append_to_file() {
+                local file="$1"
+                local line="export PATH=\"\$PATH:${INSTALL_DIR}\""
+                if [ -f "$file" ]; then
+                    if ! grep -F -q "$line" "$file" 2>/dev/null; then
+                        echo "" >> "$file"
+                        echo "$line" >> "$file"
+                        log_info "Added ${INSTALL_DIR} to ${file}"
+                        ADDED_TO_PROFILE=true
+                    fi
+                fi
+            }
+
+            append_to_file "$HOME/.bashrc"
+            append_to_file "$HOME/.zshrc"
+            append_to_file "$HOME/.profile"
+            append_to_file "$HOME/.bash_profile"
+
+            if [ "$ADDED_TO_PROFILE" = true ]; then
+                log_success "Successfully appended ${INSTALL_DIR} to your shell path configuration!"
+                log_warning "Please run 'source ~/.bashrc' (or your shell's config file) or restart your terminal to apply."
+            else
+                log_warning "The directory ${INSTALL_DIR} is not in your PATH."
+                log_warning "To run it directly, add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+                echo "  export PATH=\"\$PATH:${INSTALL_DIR}\""
+            fi
             ;;
     esac
 fi
 
 log_success "${BINARY_NAME} ${VERSION} installed successfully at ${INSTALL_DIR}/${BINARY_FILE}!"
+echo ""
+echo "🚀 Exposing Smart CLI Capabilities:"
+echo "  - Ingest your codebase manually:     ${BINARY_NAME} ingest"
+echo "  - List configured agent skills:      ${BINARY_NAME} list-skills"
+echo "  - Override settings dynamically:     ${BINARY_NAME} ingest --collection my-custom-collection"
+echo ""
+echo "💡 Auto-Discovery Active:"
+echo "  The CLI will automatically read environment variables from your agent's"
+echo "  settings files (.mcp.json, settings.local.json, config.toml) if present in the"
+echo "  directory tree, so you don't need to manually configure them in your terminal!"
+echo ""

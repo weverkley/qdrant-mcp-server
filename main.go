@@ -20,6 +20,9 @@ import (
 var Version = "1.0.0"
 
 func main() {
+	// Preprocess CLI flags and auto-discover configuration files
+	PreprocessConfig()
+
 	// Setup localized logs redirected away from stdout to keep MCP channel clean
 	log.SetOutput(os.Stderr)
 
@@ -260,6 +263,24 @@ func printCLIHelp() {
 	fmt.Println("  install-skill <agent> [dir]    Installs the rules file for the specified agent.")
 	fmt.Println("                                 Options: cursor, windsurf, cline, copilot, generic, codex, all.")
 	fmt.Println("  help, -h, --help               Show this help information.")
+	fmt.Println()
+	fmt.Println("\x1b[1;33mCommand-line Parameters / Flags:\x1b[0m")
+	fmt.Println("  --collection, -c <name>        Qdrant collection name")
+	fmt.Println("  --watch-dir, -w <path>         Directory to watch/index")
+	fmt.Println("  --ollama, -o <url>             Ollama host/URL")
+	fmt.Println("  --embedding, -e <model>        Ollama embedding model name")
+	fmt.Println("  --qdrant-host, -qh <host>      Qdrant server hostname/IP")
+	fmt.Println("  --qdrant-port, -qp <port>      Qdrant server gRPC port")
+	fmt.Println("  --exclude-dirs, -xd <list>     Comma-separated directories to skip")
+	fmt.Println("  --include-hidden-dirs, -ihd    Comma-separated hidden directories to watch")
+	fmt.Println("  --parser-mode, -pm <mode>      Parsing mode: 'code', 'doc', or 'full'")
+	fmt.Println("  --max-workers, -mw <num>       Maximum concurrent embedding threads")
+	fmt.Println()
+	fmt.Println("\x1b[1;33mAuto-Discovery Feature:\x1b[0m")
+	fmt.Println("  The server automatically searches upwards from the current directory for")
+	fmt.Println("  configuration settings in `.mcp.json`, `.claude/settings.local.json`, or")
+	fmt.Println("  `.codex/config.toml` (and user-level `~/.claude/settings.json`), auto-loading")
+	fmt.Println("  the configured environment variables for a seamless CLI experience.")
 	fmt.Println()
 	fmt.Println("\x1b[1;33mConfiguration via Environment Variables:\x1b[0m")
 	fmt.Println("  QDRANT_HOST         Qdrant hostname/IP (default: 172.20.0.5)")
