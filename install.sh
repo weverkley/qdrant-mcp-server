@@ -90,16 +90,52 @@ fi
 # 3. Determine Release Version
 if [ -z "$VERSION" ]; then
     log_info "Fetching the latest release version..."
+    
+    API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    AUTH_HEADER=""
+    
+    if [ -n "$GITHUB_TOKEN" ]; then
+        AUTH_HEADER="Authorization: token $GITHUB_TOKEN"
+    elif [ -n "$GH_TOKEN" ]; then
+        AUTH_HEADER="Authorization: token $GH_TOKEN"
+    fi
+
+    # Fetch using curl or wget
     if command -v curl >/dev/null 2>&1; then
-        LATEST_URL=$(curl -sS -o /dev/null -w "%{url_effective}" "https://github.com/${GITHUB_REPO}/releases/latest")
-        VERSION="${LATEST_URL##*/}"
+        if [ -n "$AUTH_HEADER" ]; then
+            RESPONSE=$(curl -sS -H "$AUTH_HEADER" "$API_URL" 2>/dev/null || true)
+        else
+            RESPONSE=$(curl -sS "$API_URL" 2>/dev/null || true)
+        fi
     else
-        LATEST_URL=$(wget --max-redirect=0 "https://github.com/${GITHUB_REPO}/releases/latest" 2>&1 | grep "Location:" | awk '{print $2}')
-        VERSION="${LATEST_URL##*/}"
+        if [ -n "$AUTH_HEADER" ]; then
+            RESPONSE=$(wget -qO- --header="$AUTH_HEADER" "$API_URL" 2>/dev/null || true)
+        else
+            RESPONSE=$(wget -qO- "$API_URL" 2>/dev/null || true)
+        fi
+    fi
+
+    # Extract tag_name using standard grep and sed
+    VERSION=$(echo "$RESPONSE" | grep '"tag_name":' | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/' | tr -d '[:space:]' 2>/dev/null || true)
+
+    # Fallback to redirect URL method if API method fails
+    if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ] || echo "$RESPONSE" | grep -q "message" 2>/dev/null; then
+        log_warning "GitHub API rate limit reached or private repository auth required. Retrying with redirect URL method..."
+        if command -v curl >/dev/null 2>&1; then
+            LATEST_URL=$(curl -sSL -o /dev/null -w "%{url_effective}" "https://github.com/${GITHUB_REPO}/releases/latest")
+            VERSION="${LATEST_URL##*/}"
+        else
+            LATEST_URL=$(wget --max-redirect=0 "https://github.com/${GITHUB_REPO}/releases/latest" 2>&1 | grep "Location:" | awk '{print $2}')
+            VERSION="${LATEST_URL##*/}"
+        fi
     fi
     
     if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
-        log_error "Failed to retrieve the latest version. Please specify 'VERSION' manually (e.g., VERSION=v1.0.0)."
+        log_error "Failed to retrieve the latest version."
+        log_error "If this is a private repository, please pass GITHUB_TOKEN or specify the version manually, e.g.:"
+        log_error "  curl -fsSL https://raw.githubusercontent.com/... | VERSION=1.4.0 sh"
+        log_error "  Or with authentication:"
+        log_error "  curl -fsSL -H 'Authorization: token YOUR_TOKEN' https://raw.githubusercontent.com/... | GITHUB_TOKEN=YOUR_TOKEN sh"
         exit 1
     fi
 fi
