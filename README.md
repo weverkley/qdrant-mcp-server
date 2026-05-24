@@ -276,6 +276,48 @@ Once configured, the MCP server automatically chunks and indexes your `.codex/*.
 
 ---
 
+## 🎯 Stop-Words Filtering (Multilingual & Custom)
+
+When using **sparse** or **hybrid** search modes, the server computes sparse vectors (using a state-free TF-IDF/BM25 approximation with FNV-1a token hashing). To guarantee extremely high-quality exact keyword lookups and prevent common grammatical noise from polluting your vector index, the server features a comprehensive stop-words filtering engine.
+
+### 🌐 Built-in Multilingual Support
+Out of the box, the server identifies and automatically excludes grammatical noise, prepositions, articles, and pronouns across multiple Western European languages:
+- **English**: `the`, `a`, `and`, `or`, `but`, `for`, `with`, `about`, `against`...
+- **Spanish**: `el`, `la`, `los`, `las`, `un`, `una`, `de`, `del`, `con`, `por`, `para`, `que`...
+- **Portuguese**: `uma`, `da`, `dos`, `ao`, `na`, `ou`, `mais`, `lhe`, `seu`, `sua`, `com`...
+- **German**: `der`, `die`, `und`, `oder`, `mit`, `von`, `zu`, `auf`, `bei`, `für`, `gegen`...
+- **French**: `une`, `du`, `au`, `dans`, `par`, `pour`, `avec`, `car`, `son`, `ses`...
+- **Italian**: `gli`, `dello`, `della`, `dei`, `col`, `perché`, `questo`, `quello`...
+
+This keeps sparse index weights highly focused on meaningful keywords even when operating in multilingual environments or indexing localized codebase documentation.
+
+### 🛠️ Workspace-Level Custom Stop-Words
+For project-specific rules—like ignoring boilerplate framework imports, common logging verbs, or package namespaces—you can place a custom `.mcp-stopwords` file directly in the root of your configured `WATCH_DIRECTORY`.
+
+#### How it works:
+1. Create a file named `.mcp-stopwords` in your active project root.
+2. Add one stop-word per line.
+3. Blank lines and lines starting with `#` are treated as comments and skipped automatically.
+
+#### Example `.mcp-stopwords` file:
+```text
+# Ignore boilerplate framework/namespace keywords
+import
+package
+func
+namespace
+
+# Project-specific common keywords
+logger
+err
+ctx
+fmt
+```
+
+On startup or codebase crawl, the server automatically reads the `.mcp-stopwords` file, merging those custom entries into the active indexing and query search filtering pipelines.
+
+---
+
 ## 🛠️ Provided Tools
 
 ### `qdrant_search`
