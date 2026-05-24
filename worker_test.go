@@ -485,7 +485,7 @@ func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 
 func TestComputeSparseVector(t *testing.T) {
 	text := "Hello world! This is a test_vector symbol. Hello code."
-	indices, values := ComputeSparseVector(text)
+	indices, values := ComputeSparseVector(text, nil)
 
 	// "hello", "world", "test_vector", "symbol", "code" are valid tokens.
 	// "this", "is", "a" are stop words.
@@ -643,6 +643,30 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	}
 	if sparsePrefetch.Using == nil || *sparsePrefetch.Using != "sparse" {
 		t.Errorf("Expected sparse prefetch Using to be 'sparse', got %v", sparsePrefetch.Using)
+	}
+}
+
+func TestComputeSparseVector_CustomStopWords(t *testing.T) {
+	// Test multilingual stop words are filtered correctly
+	// Spanish "de", Portuguese "com", German "und" are stop words in our new map!
+	text := "hola de amigo com hello und code"
+	// Without custom stop words
+	indices, _ := ComputeSparseVector(text, nil)
+	// Expected unique tokens: "hola" (not stop), "amigo" (not stop), "hello" (not stop), "code" (not stop).
+	// "de", "com", "und" are multilingual stop-words!
+	if len(indices) != 4 {
+		t.Fatalf("Expected 4 tokens after multilingual stop-word filtering, got %d", len(indices))
+	}
+
+	// Test custom stop words file
+	customStopWords := map[string]struct{}{
+		"amigo": {},
+		"hello": {},
+	}
+	indices2, _ := ComputeSparseVector(text, customStopWords)
+	// Expected unique tokens: "hola", "code" (since "amigo" and "hello" are custom-filtered!)
+	if len(indices2) != 2 {
+		t.Fatalf("Expected 2 tokens after custom stop-word filtering, got %d", len(indices2))
 	}
 }
 

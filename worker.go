@@ -284,9 +284,28 @@ type IngestionWorker struct {
 	gitignoreMatcher     *GitIgnoreMatcher
 	batchUpserter        *BatchUpserter
 	concurrencyController *ConcurrencyController
+	customStopWords      map[string]struct{}
 }
 
 func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
+	// Look for .mcp-stopwords in cfg.WatchDirectory
+	customStopWords := make(map[string]struct{})
+	if cfg.WatchDirectory != "" {
+		stopWordsPath := filepath.Join(cfg.WatchDirectory, ".mcp-stopwords")
+		if data, err := os.ReadFile(stopWordsPath); err == nil {
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				token := strings.ToLower(strings.TrimSpace(line))
+				// Skip empty lines or comments starting with #
+				if token == "" || strings.HasPrefix(token, "#") {
+					continue
+				}
+				customStopWords[token] = struct{}{}
+			}
+			log.Printf("Loaded %d custom stop-words from %s", len(customStopWords), stopWordsPath)
+		}
+	}
+
 	iw := &IngestionWorker{
 		cfg:              cfg,
 		qdrantClient:     qdrantClient,
@@ -294,6 +313,7 @@ func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgn
 		pendingFiles:     make(map[string]time.Time),
 		sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
 		gitignoreMatcher: gitIgnore,
+		customStopWords:  customStopWords,
 	}
 	iw.batchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
 	iw.concurrencyController = NewConcurrencyController(cfg.MaxEmbeddingWorkers)
@@ -456,7 +476,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["receiver"] = fn.Receiver
 			}
 
-			sIndices, sValues := ComputeSparseVector(fn.Signature)
+			sIndices, sValues := ComputeSparseVector(fn.Signature, iw.customStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -495,7 +515,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["page_number"] = int64(chunk.PageNumber)
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk.Content)
+			sIndices, sValues := ComputeSparseVector(chunk.Content, iw.customStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -532,7 +552,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"updated":       time.Now().Unix(),
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk)
+			sIndices, sValues := ComputeSparseVector(chunk, iw.customStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -821,7 +841,7 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 
 	switch searchMode {
 	case "sparse":
-		sIndices, sValues := ComputeSparseVector(query)
+		sIndices, sValues := ComputeSparseVector(query, iw.customStopWords)
 		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.cfg.CollectionName,
 			Query:          qdrant.NewQuerySparse(sIndices, sValues),
@@ -831,7 +851,7 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 			Using:          qdrant.PtrOf("sparse"),
 		})
 	case "hybrid":
-		sIndices, sValues := ComputeSparseVector(query)
+		sIndices, sValues := ComputeSparseVector(query, iw.customStopWords)
 		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.cfg.CollectionName,
 			Prefetch: []*qdrant.PrefetchQuery{
@@ -1026,6 +1046,7 @@ func sanitizePayload(payload map[string]interface{}) map[string]interface{} {
 var tokenRegex = regexp.MustCompile(`[a-zA-Z0-9_]+`)
 
 var stopWords = map[string]struct{}{
+	// === English ===
 	"a": {}, "about": {}, "above": {}, "after": {}, "again": {}, "against": {}, "all": {}, "am": {}, "an": {}, "and": {}, "any": {}, "are": {}, "arent": {}, "as": {}, "at": {},
 	"be": {}, "because": {}, "been": {}, "before": {}, "being": {}, "below": {}, "between": {}, "both": {}, "but": {}, "by": {},
 	"cant": {}, "cannot": {}, "could": {}, "couldnt": {},
@@ -1042,9 +1063,24 @@ var stopWords = map[string]struct{}{
 	"than": {}, "that": {}, "thats": {}, "the": {}, "their": {}, "theirs": {}, "them": {}, "themselves": {}, "then": {}, "there": {}, "theres": {}, "these": {}, "they": {}, "theyd": {}, "theyll": {}, "theyre": {}, "theyve": {}, "this": {}, "those": {}, "through": {}, "to": {}, "too": {}, "under": {}, "until": {}, "up": {}, "very": {},
 	"was": {}, "wasnt": {}, "we": {}, "wed": {}, "well": {}, "were": {}, "weve": {}, "werent": {}, "what": {}, "whats": {}, "when": {}, "whens": {}, "where": {}, "wheres": {}, "which": {}, "while": {}, "who": {}, "whos": {}, "whom": {}, "why": {}, "whys": {}, "with": {}, "wont": {}, "would": {}, "wouldnt": {},
 	"you": {}, "youd": {}, "youll": {}, "youre": {}, "youve": {}, "your": {}, "yours": {}, "yourself": {}, "yourselves": {},
+
+	// === Spanish ===
+	"el": {}, "la": {}, "los": {}, "las": {}, "un": {}, "una": {}, "unos": {}, "unas": {}, "de": {}, "del": {}, "al": {}, "en": {}, "con": {}, "por": {}, "para": {}, "y": {}, "pero": {}, "mas": {}, "que": {}, "se": {}, "lo": {}, "le": {}, "les": {}, "te": {}, "nos": {}, "os": {}, "su": {}, "sus": {}, "mis": {}, "tus": {}, "este": {}, "esta": {}, "esto": {}, "estos": {}, "estas": {}, "ese": {}, "esa": {}, "eso": {}, "esos": {}, "esas": {}, "aquel": {}, "aquella": {}, "aquello": {}, "aquellos": {}, "aquellas": {}, "yo": {}, "ella": {}, "nosotros": {}, "nosotras": {}, "vosotros": {}, "vosotras": {}, "ellos": {}, "ellas": {}, "ti": {}, "si": {}, "como": {}, "sin": {}, "sobre": {}, "tras": {}, "durante": {}, "mediante": {},
+
+	// === Portuguese ===
+	"uma": {}, "da": {}, "dos": {}, "das": {}, "ao": {}, "aos": {}, "na": {}, "nas": {}, "ou": {}, "mais": {}, "lhe": {}, "lhes": {}, "seu": {}, "sua": {}, "seus": {}, "suas": {}, "meu": {}, "minha": {}, "meus": {}, "minhas": {}, "teu": {}, "tua": {}, "teus": {}, "tuas": {}, "isto": {}, "isso": {}, "aquilo": {}, "eu": {}, "ele": {}, "elea": {}, "eles": {}, "elas": {}, "mim": {}, "sem": {}, "sob": {}, "com": {},
+
+	// === German ===
+	"der": {}, "die": {}, "des": {}, "dem": {}, "den": {}, "ein": {}, "eine": {}, "einer": {}, "eines": {}, "einem": {}, "einen": {}, "und": {}, "oder": {}, "aber": {}, "denn": {}, "doch": {}, "mit": {}, "von": {}, "zu": {}, "auf": {}, "aus": {}, "bei": {}, "fur": {}, "gegen": {}, "ohne": {}, "um": {}, "nach": {}, "uber": {}, "unter": {}, "vor": {}, "zwischen": {}, "ich": {}, "er": {}, "sie": {}, "es": {}, "wir": {}, "ihr": {}, "mein": {}, "dein": {}, "sein": {}, "unser": {}, "euer": {}, "dieses": {}, "diese": {}, "dieser": {}, "jener": {}, "jene": {}, "jenes": {}, "mir": {}, "dir": {}, "ihm": {}, "euch": {}, "ihnen": {}, "sich": {}, "wie": {}, "als": {}, "weil": {}, "dass": {}, "wenn": {},
+
+	// === French ===
+	"une": {}, "du": {}, "au": {}, "aux": {}, "dans": {}, "par": {}, "pour": {}, "avec": {}, "car": {}, "donc": {}, "ni": {}, "lui": {}, "leur": {}, "son": {}, "sa": {}, "ses": {}, "mon": {}, "ma": {}, "mes": {}, "ton": {}, "ta": {}, "tes": {}, "ce": {}, "cette": {}, "ces": {}, "ceci": {}, "cela": {}, "ca": {}, "celui": {}, "celle": {}, "ceux": {}, "celles": {}, "je": {}, "il": {}, "ils": {}, "elles": {}, "moi": {}, "toi": {}, "soi": {}, "plus": {}, "sans": {}, "sous": {}, "sur": {}, "chez": {}, "pendant": {},
+
+	// === Italian ===
+	"gli": {}, "dello": {}, "della": {}, "dei": {}, "degli": {}, "delle": {}, "allo": {}, "alla": {}, "ai": {}, "agli": {}, "alle": {}, "nel": {}, "nello": {}, "nella": {}, "nei": {}, "negli": {}, "nelle": {}, "col": {}, "dallo": {}, "dalla": {}, "dai": {}, "dagli": {}, "dalle": {}, "perche": {}, "li": {}, "ci": {}, "vi": {}, "suoi": {}, "sue": {}, "mio": {}, "mia": {}, "miei": {}, "mie": {}, "tuo": {}, "tuoi": {}, "tue": {}, "questo": {}, "questa": {}, "questi": {}, "queste": {}, "quello": {}, "quella": {}, "quelli": {}, "quelle": {}, "egli": {}, "essi": {}, "esse": {}, "fra": {}, "sopra": {},
 }
 
-func ComputeSparseVector(text string) ([]uint32, []float32) {
+func ComputeSparseVector(text string, customStopWords map[string]struct{}) ([]uint32, []float32) {
 	text = strings.ToLower(text)
 	matches := tokenRegex.FindAllString(text, -1)
 
@@ -1052,6 +1088,11 @@ func ComputeSparseVector(text string) ([]uint32, []float32) {
 	for _, match := range matches {
 		if _, isStop := stopWords[match]; isStop {
 			continue
+		}
+		if customStopWords != nil {
+			if _, isCustom := customStopWords[match]; isCustom {
+				continue
+			}
 		}
 		if len(match) == 0 {
 			continue
