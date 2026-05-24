@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 // --- File Watcher & Ingestion Subsystems ---
-func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, eventChan chan<- string) {
+func (iw *IngestionWorker) WatchLoop(ctx context.Context, watcher *fsnotify.Watcher, eventChan chan<- string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -30,7 +30,7 @@ func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watc
 
 			// Dynamically determine if the event path matches any allowed hidden folder patterns
 			isAllowedHiddenPath := false
-			for _, allowedDir := range iw.cfg.IncludeHiddenDirs {
+			for _, allowedDir := range iw.Cfg.IncludeHiddenDirs {
 				if strings.Contains(event.Name, "/"+allowedDir+"/") {
 					isAllowedHiddenPath = true
 					break
@@ -57,7 +57,7 @@ func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watc
 	}
 }
 
-func (iw *IngestionWorker) ingestionConsumer(ctx context.Context, eventChan <-chan string) {
+func (iw *IngestionWorker) IngestionConsumer(ctx context.Context, eventChan <-chan string) {
 	timers := make(map[string]*time.Timer)
 
 	for {
@@ -75,24 +75,24 @@ func (iw *IngestionWorker) ingestionConsumer(ctx context.Context, eventChan <-ch
 				timer.Stop()
 			}
 
-			iw.mu.Lock()
-			iw.pendingFiles[path] = time.Now()
-			iw.mu.Unlock()
+			iw.Mu.Lock()
+			iw.PendingFiles[path] = time.Now()
+			iw.Mu.Unlock()
 
-			timers[path] = time.AfterFunc(iw.cfg.DebounceDuration, func() {
-				iw.mu.Lock()
-				delete(iw.pendingFiles, path)
-				iw.activeSyncs++
-				iw.mu.Unlock()
+			timers[path] = time.AfterFunc(iw.Cfg.DebounceDuration, func() {
+				iw.Mu.Lock()
+				delete(iw.PendingFiles, path)
+				iw.ActiveSyncs++
+				iw.Mu.Unlock()
 
 				defer func() {
-					iw.mu.Lock()
-					iw.activeSyncs--
-					iw.totalSynced++
-					iw.mu.Unlock()
+					iw.Mu.Lock()
+					iw.ActiveSyncs--
+					iw.TotalSynced++
+					iw.Mu.Unlock()
 				}()
 
-				iw.syncFileState(context.Background(), path)
+				iw.SyncFileState(context.Background(), path)
 			})
 		}
 	}

@@ -1,4 +1,4 @@
-package main
+package tests
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
+
+	"qdrant-mcp-server/server"
 )
 
 type MockQdrantClient struct {
@@ -66,7 +68,7 @@ func TestBatchUpserter_BatchSizeTrigger(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	batchSize := 3
 	timeout := 10 * time.Second // large timeout so it doesn't trigger by timeout
-	b := NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
+	b := server.NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
 	defer b.Close()
 
 	// Add 2 points (less than batch size)
@@ -107,7 +109,7 @@ func TestBatchUpserter_TimeoutTrigger(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	batchSize := 10 // large batch size
 	timeout := 50 * time.Millisecond
-	b := NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
+	b := server.NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
 	defer b.Close()
 
 	// Add 2 points
@@ -137,7 +139,7 @@ func TestBatchUpserter_ExplicitFlush(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	batchSize := 10
 	timeout := 10 * time.Second
-	b := NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
+	b := server.NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
 	defer b.Close()
 
 	// Add 3 points
@@ -168,7 +170,7 @@ func TestBatchUpserter_Concurrency(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	batchSize := 5
 	timeout := 50 * time.Millisecond
-	b := NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
+	b := server.NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
 	defer b.Close()
 
 	numWorkers := 10
@@ -206,7 +208,7 @@ func TestBatchUpserter_Close(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	batchSize := 10
 	timeout := 10 * time.Second
-	b := NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
+	b := server.NewBatchUpserter(mockClient, "test-collection", batchSize, timeout)
 
 	// Add 3 points
 	b.Add(&qdrant.PointStruct{Id: qdrant.NewIDNum(1)})
@@ -257,7 +259,7 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 	// Set up mock client
 	mockClient := &MockQdrantClient{}
 
-	cfg := Config{
+	Cfg := server.Config{
 		CollectionName:      "test-collection",
 		WatchDirectory:      os.TempDir(),
 		OllamaHost:          "http://localhost:11434",
@@ -267,7 +269,7 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		BatchTimeout:        1 * time.Second,
 	}
 
-	worker := NewIngestionWorker(cfg, mockClient, nil)
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
 	defer worker.Close()
 
 	mockHTTP := &MockRoundTripper{
@@ -280,12 +282,12 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 			}, nil
 		},
 	}
-	worker.httpClient.Transport = mockHTTP
+	worker.HTTPClient.Transport = mockHTTP
 
 	// --- 1. First Ingestion (Empty Qdrant, should ingest) ---
 	mockClient.scrollResp = nil
-	worker.syncFileState(context.Background(), tmpFile.Name())
-	worker.batchUpserter.Flush()
+	worker.SyncFileState(context.Background(), tmpFile.Name())
+	worker.BatchUpserter.Flush()
 
 	mockClient.mu.Lock()
 	initialUpsertCount := len(mockClient.upsertCalls)
@@ -314,8 +316,8 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		},
 	}
 
-	worker.syncFileState(context.Background(), tmpFile.Name())
-	worker.batchUpserter.Flush()
+	worker.SyncFileState(context.Background(), tmpFile.Name())
+	worker.BatchUpserter.Flush()
 
 	mockClient.mu.Lock()
 	skipUpsertCount := len(mockClient.upsertCalls)
@@ -343,8 +345,8 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		},
 	}
 
-	worker.syncFileState(context.Background(), tmpFile.Name())
-	worker.batchUpserter.Flush()
+	worker.SyncFileState(context.Background(), tmpFile.Name())
+	worker.BatchUpserter.Flush()
 
 	mockClient.mu.Lock()
 	staleUpsertCount := len(mockClient.upsertCalls)
@@ -360,7 +362,7 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 }
 
 func TestConcurrencyController_AIMD(t *testing.T) {
-	c := NewConcurrencyController(4)
+	c := server.NewConcurrencyController(4)
 
 	// Verify initial limit is max
 	if limit := c.GetLimit(); limit != 4 {
@@ -405,7 +407,7 @@ func TestConcurrencyController_AIMD(t *testing.T) {
 
 func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
 	mockClient := &MockQdrantClient{}
-	cfg := Config{
+	Cfg := server.Config{
 		CollectionName:      "test-collection",
 		WatchDirectory:      os.TempDir(),
 		OllamaHost:          "http://localhost:11434",
@@ -413,7 +415,7 @@ func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
 		MaxEmbeddingWorkers: 4,
 	}
 
-	worker := NewIngestionWorker(cfg, mockClient, nil)
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
 	defer worker.Close()
 
 	attempts := 0
@@ -437,10 +439,10 @@ func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
 			}, nil
 		},
 	}
-	worker.httpClient.Transport = mockHTTP
+	worker.HTTPClient.Transport = mockHTTP
 
 	ctx := context.Background()
-	emb, err := worker.fetchRemoteEmbedding(ctx, "hello test")
+	emb, err := worker.FetchRemoteEmbedding(ctx, "hello test")
 	if err != nil {
 		t.Fatalf("Expected embedding fetch to eventually succeed after retries, got error: %v", err)
 	}
@@ -453,14 +455,14 @@ func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
 	}
 
 	// Verify concurrency limit scaled down due to 429 failures
-	if limit := worker.concurrencyController.GetLimit(); limit != 1 {
+	if limit := worker.ConcurrencyController.GetLimit(); limit != 1 {
 		t.Fatalf("Expected concurrency limit to be scaled down to 1, got %d", limit)
 	}
 }
 
 func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 	mockClient := &MockQdrantClient{}
-	cfg := Config{
+	Cfg := server.Config{
 		CollectionName:      "test-collection",
 		WatchDirectory:      os.TempDir(),
 		OllamaHost:          "http://localhost:11434",
@@ -468,11 +470,11 @@ func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 		MaxEmbeddingWorkers: 1,
 	}
 
-	worker := NewIngestionWorker(cfg, mockClient, nil)
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
 	defer worker.Close()
 
 	logPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server.log")
-	worker.syncFileState(context.Background(), logPath)
+	worker.SyncFileState(context.Background(), logPath)
 
 	mockClient.mu.Lock()
 	upsertCount := len(mockClient.upsertCalls)
@@ -485,7 +487,7 @@ func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 
 func TestComputeSparseVector(t *testing.T) {
 	text := "Hello world! This is a test_vector symbol. Hello code."
-	indices, values := ComputeSparseVector(text, nil)
+	indices, values := server.ComputeSparseVector(text, nil)
 
 	// "hello", "world", "test_vector", "symbol", "code" are valid tokens.
 	// "this", "is", "a" are stop words.
@@ -541,7 +543,7 @@ func TestComputeSparseVector(t *testing.T) {
 
 func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	mockClient := &MockQdrantClient{}
-	cfg := Config{
+	Cfg := server.Config{
 		CollectionName:      "test-collection",
 		WatchDirectory:      os.TempDir(),
 		OllamaHost:          "http://localhost:11434",
@@ -550,7 +552,7 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 		SearchMode:          "dense",
 	}
 
-	worker := NewIngestionWorker(cfg, mockClient, nil)
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
 	defer worker.Close()
 
 	// Mock Ollama host HTTP response for fetching query embedding
@@ -564,13 +566,13 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 			}, nil
 		},
 	}
-	worker.httpClient.Transport = mockHTTP
+	worker.HTTPClient.Transport = mockHTTP
 
 	ctx := context.Background()
 
 	// Test 1: Dense Search Mode
-	worker.cfg.SearchMode = "dense"
-	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+	worker.Cfg.SearchMode = "dense"
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) != 1 {
@@ -589,8 +591,8 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	}
 
 	// Test 2: Sparse Search Mode
-	worker.cfg.SearchMode = "sparse"
-	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+	worker.Cfg.SearchMode = "sparse"
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) != 1 {
@@ -609,8 +611,8 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	}
 
 	// Test 3: Hybrid Search Mode
-	worker.cfg.SearchMode = "hybrid"
-	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+	worker.Cfg.SearchMode = "hybrid"
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) != 1 {
@@ -651,7 +653,7 @@ func TestComputeSparseVector_CustomStopWords(t *testing.T) {
 	// Spanish "de", Portuguese "com", German "und" are stop words in our new map!
 	text := "hola de amigo com hello und code"
 	// Without custom stop words
-	indices, _ := ComputeSparseVector(text, nil)
+	indices, _ := server.ComputeSparseVector(text, nil)
 	// Expected unique tokens: "hola" (not stop), "amigo" (not stop), "hello" (not stop), "code" (not stop).
 	// "de", "com", "und" are multilingual stop-words!
 	if len(indices) != 4 {
@@ -663,7 +665,7 @@ func TestComputeSparseVector_CustomStopWords(t *testing.T) {
 		"amigo": {},
 		"hello": {},
 	}
-	indices2, _ := ComputeSparseVector(text, customStopWords)
+	indices2, _ := server.ComputeSparseVector(text, customStopWords)
 	// Expected unique tokens: "hola", "code" (since "amigo" and "hello" are custom-filtered!)
 	if len(indices2) != 2 {
 		t.Fatalf("Expected 2 tokens after custom stop-word filtering, got %d", len(indices2))

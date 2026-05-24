@@ -1,14 +1,16 @@
-package main
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"qdrant-mcp-server/server"
 )
 
 func TestParseCLIFlags(t *testing.T) {
 	args := []string{"ingest", "--collection", "test-collection", "-w", "/some/path", "--ollama=http://ollama:11434"}
-	flags := parseCLIFlags(args)
+	flags := server.ParseCLIFlags(args)
 
 	if flags["QDRANT_COLLECTION"] != "test-collection" {
 		t.Errorf("Expected test-collection, got %s", flags["QDRANT_COLLECTION"])
@@ -48,7 +50,7 @@ func TestLoadJsonConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vars := loadJsonConfig(jsonPath)
+	vars := server.LoadJsonConfig(jsonPath)
 	if vars["QDRANT_COLLECTION"] != "json-collection" {
 		t.Errorf("Expected json-collection, got %s", vars["QDRANT_COLLECTION"])
 	}
@@ -83,7 +85,7 @@ OLLAMA_HOST = "http://toml-ollama:11434"
 		t.Fatal(err)
 	}
 
-	vars := loadTomlConfig(tomlPath)
+	vars := server.LoadTomlConfig(tomlPath)
 	if vars["QDRANT_COLLECTION"] != "toml-collection" {
 		t.Errorf("Expected toml-collection, got %s", vars["QDRANT_COLLECTION"])
 	}
@@ -99,19 +101,19 @@ func TestConfig_LogToFileParsing(t *testing.T) {
 	os.Setenv("LOG_TO_FILE", "true")
 	defer os.Unsetenv("LOG_TO_FILE")
 
-	cfg := loadConfig()
+	cfg := server.LoadConfig()
 	if !cfg.LogToFile {
 		t.Errorf("Expected LogToFile to be true when LOG_TO_FILE env is true")
 	}
 
 	args := []string{"ingest", "--log-to-file", "false"}
-	flags := parseCLIFlags(args)
+	flags := server.ParseCLIFlags(args)
 	if flags["LOG_TO_FILE"] != "false" {
 		t.Errorf("Expected flags[LOG_TO_FILE] to be false, got %s", flags["LOG_TO_FILE"])
 	}
 
 	args2 := []string{"ingest", "-lf", "true"}
-	flags2 := parseCLIFlags(args2)
+	flags2 := server.ParseCLIFlags(args2)
 	if flags2["LOG_TO_FILE"] != "true" {
 		t.Errorf("Expected flags2[LOG_TO_FILE] to be true, got %s", flags2["LOG_TO_FILE"])
 	}
@@ -121,21 +123,20 @@ func TestConfig_SearchModeParsing(t *testing.T) {
 	os.Setenv("SEARCH_MODE", "hybrid")
 	defer os.Unsetenv("SEARCH_MODE")
 
-	cfg := loadConfig()
+	cfg := server.LoadConfig()
 	if cfg.SearchMode != "hybrid" {
 		t.Errorf("Expected SearchMode to be hybrid, got %s", cfg.SearchMode)
 	}
 
 	args := []string{"ingest", "--search-mode", "sparse"}
-	flags := parseCLIFlags(args)
+	flags := server.ParseCLIFlags(args)
 	if flags["SEARCH_MODE"] != "sparse" {
 		t.Errorf("Expected flags[SEARCH_MODE] to be sparse, got %s", flags["SEARCH_MODE"])
 	}
 
 	args2 := []string{"ingest", "-sm", "dense"}
-	flags2 := parseCLIFlags(args2)
+	flags2 := server.ParseCLIFlags(args2)
 	if flags2["SEARCH_MODE"] != "dense" {
 		t.Errorf("Expected flags2[SEARCH_MODE] to be dense, got %s", flags2["SEARCH_MODE"])
 	}
 }
-

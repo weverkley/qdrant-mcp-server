@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -29,7 +29,7 @@ type SearchArguments struct {
 	PathPrefix     string   `json:"path_prefix,omitempty"`
 }
 
-func (iw *IngestionWorker) listenToMCPClient(ctx context.Context) {
+func (iw *IngestionWorker) ListenToMCPClient(ctx context.Context) {
 	dec := json.NewDecoder(os.Stdin)
 	for {
 		select {
@@ -144,7 +144,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 
 			// Process the RAG search query across the local network interface
 			go func() {
-				resultsText, err := iw.executeVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix)
+				resultsText, err := iw.ExecuteVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix)
 				if err != nil {
 					log.Printf("Internal RAG search failed: %v", err)
 					iw.sendMCPError(req.ID, -32603, fmt.Sprintf("Search execution error: %v", err))
@@ -168,21 +168,21 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 				fmt.Println(string(out))
 			}()
 		} else if params.Name == "get_sync_status" {
-			iw.mu.Lock()
+			iw.Mu.Lock()
 			status := "idle"
-			if len(iw.pendingFiles) > 0 || iw.activeSyncs > 0 {
+			if len(iw.PendingFiles) > 0 || iw.ActiveSyncs > 0 {
 				status = "syncing"
 			}
 
 			pendingList := []string{}
-			for p := range iw.pendingFiles {
+			for p := range iw.PendingFiles {
 				pendingList = append(pendingList, p)
 			}
 
-			pendingCount := len(iw.pendingFiles)
-			activeCount := iw.activeSyncs
-			totalCount := iw.totalSynced
-			iw.mu.Unlock()
+			pendingCount := len(iw.PendingFiles)
+			activeCount := iw.ActiveSyncs
+			totalCount := iw.TotalSynced
+			iw.Mu.Unlock()
 
 			// Format output nicely in Markdown
 			var sb strings.Builder
@@ -225,7 +225,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 				// Respond directly to the active IDE context stream window
 				var sb strings.Builder
 				sb.WriteString("### 🚀 Codebase Ingestion Complete\n\n")
-				sb.WriteString(fmt.Sprintf("Successfully scanned and synchronized **%d** files into the Qdrant collection `%s`.\n", count, iw.cfg.CollectionName))
+				sb.WriteString(fmt.Sprintf("Successfully scanned and synchronized **%d** files into the Qdrant collection `%s`.\n", count, iw.Cfg.CollectionName))
 
 				response := map[string]interface{}{
 					"jsonrpc": "2.0",

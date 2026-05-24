@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -273,18 +273,18 @@ func (c *ConcurrencyController) decreaseLimit(reason string) {
 }
 
 type IngestionWorker struct {
-	cfg                  Config
-	qdrantClient         QdrantClient
-	httpClient           *http.Client
-	mu                   sync.Mutex
-	pendingFiles         map[string]time.Time
-	activeSyncs          int
-	totalSynced          int
-	sem                  chan struct{} // semaphore to rate limit concurrent embedding workers
-	gitignoreMatcher     *GitIgnoreMatcher
-	batchUpserter        *BatchUpserter
-	concurrencyController *ConcurrencyController
-	customStopWords      map[string]struct{}
+	Cfg                  Config
+	QdrantClient         QdrantClient
+	HTTPClient           *http.Client
+	Mu                   sync.Mutex
+	PendingFiles         map[string]time.Time
+	ActiveSyncs          int
+	TotalSynced          int
+	Sem                  chan struct{} // semaphore to rate limit concurrent embedding workers
+	GitignoreMatcher     *GitIgnoreMatcher
+	BatchUpserter        *BatchUpserter
+	ConcurrencyController *ConcurrencyController
+	CustomStopWords      map[string]struct{}
 }
 
 func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
@@ -307,22 +307,22 @@ func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgn
 	}
 
 	iw := &IngestionWorker{
-		cfg:              cfg,
-		qdrantClient:     qdrantClient,
-		httpClient:       &http.Client{Timeout: 15 * time.Second},
-		pendingFiles:     make(map[string]time.Time),
-		sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
-		gitignoreMatcher: gitIgnore,
-		customStopWords:  customStopWords,
+		Cfg:              cfg,
+		QdrantClient:     qdrantClient,
+		HTTPClient:       &http.Client{Timeout: 15 * time.Second},
+		PendingFiles:     make(map[string]time.Time),
+		Sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
+		GitignoreMatcher: gitIgnore,
+		CustomStopWords:  customStopWords,
 	}
-	iw.batchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
-	iw.concurrencyController = NewConcurrencyController(cfg.MaxEmbeddingWorkers)
+	iw.BatchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
+	iw.ConcurrencyController = NewConcurrencyController(cfg.MaxEmbeddingWorkers)
 	return iw
 }
 
 func (iw *IngestionWorker) Close() {
-	if iw.batchUpserter != nil {
-		iw.batchUpserter.Close()
+	if iw.BatchUpserter != nil {
+		iw.BatchUpserter.Close()
 	}
 }
 
@@ -335,20 +335,20 @@ type OllamaEmbedResp struct {
 	Embedding []float32 `json:"embedding"`
 }
 
-func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
+func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	if strings.Contains(path, ".qdrant-mcp-server.log") {
 		return
 	}
-	if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, false) {
+	if iw.GitignoreMatcher != nil && iw.GitignoreMatcher.IsIgnored(path, false) {
 		return
 	}
-	if iw.sem != nil {
+	if iw.Sem != nil {
 		select {
-		case iw.sem <- struct{}{}:
+		case iw.Sem <- struct{}{}:
 		case <-ctx.Done():
 			return
 		}
-		defer func() { <-iw.sem }()
+		defer func() { <-iw.Sem }()
 	}
 
 	info, err := os.Stat(path)
@@ -382,8 +382,8 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
 
 	// Scroll Qdrant to check if the file hash matches
-	scrollResult, err := iw.qdrantClient.Scroll(ctx, &qdrant.ScrollPoints{
-		CollectionName: iw.cfg.CollectionName,
+	scrollResult, err := iw.QdrantClient.Scroll(ctx, &qdrant.ScrollPoints{
+		CollectionName: iw.Cfg.CollectionName,
 		Filter: &qdrant.Filter{
 			Must: []*qdrant.Condition{
 				qdrant.NewMatchKeyword("file_path", path),
@@ -406,7 +406,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 
 	ext := strings.ToLower(filepath.Ext(path))
 	extClean := strings.TrimPrefix(ext, ".")
-	relPath, _ := filepath.Rel(iw.cfg.WatchDirectory, path)
+	relPath, _ := filepath.Rel(iw.Cfg.WatchDirectory, path)
 	relDirs := convertStringSlice(getParentDirs(relPath))
 	var points []*qdrant.PointStruct
 
@@ -415,11 +415,11 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	isSupportedDoc := false
 	switch ext {
 	case ".go", ".js", ".jsx", ".ts", ".tsx", ".php", ".cs", ".py":
-		if iw.cfg.ParserMode == "code" || iw.cfg.ParserMode == "full" {
+		if iw.Cfg.ParserMode == "code" || iw.Cfg.ParserMode == "full" {
 			isSupportedCode = true
 		}
 	case ".pdf", ".md", ".txt", ".csv", ".xls", ".xlsx", ".doc", ".docx":
-		if iw.cfg.ParserMode == "doc" || iw.cfg.ParserMode == "full" {
+		if iw.Cfg.ParserMode == "doc" || iw.Cfg.ParserMode == "full" {
 			isSupportedDoc = true
 		}
 	}
@@ -447,7 +447,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	if len(functions) > 0 {
 		for idx, fn := range functions {
 			// Compute embeddings of the function code body (held in fn.Signature)
-			vector, err := iw.fetchRemoteEmbedding(ctx, fn.Signature)
+			vector, err := iw.FetchRemoteEmbedding(ctx, fn.Signature)
 			if err != nil {
 				log.Printf("Ollama vectorization failed on AST function %s in %s: %v", fn.Name, path, err)
 				continue
@@ -476,7 +476,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["receiver"] = fn.Receiver
 			}
 
-			sIndices, sValues := ComputeSparseVector(fn.Signature, iw.customStopWords)
+			sIndices, sValues := ComputeSparseVector(fn.Signature, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -489,7 +489,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 		}
 	} else if isDocParsed {
 		for idx, chunk := range docChunks {
-			vector, err := iw.fetchRemoteEmbedding(ctx, chunk.Content)
+			vector, err := iw.FetchRemoteEmbedding(ctx, chunk.Content)
 			if err != nil {
 				log.Printf("Ollama vectorization failed on document chunk %d of %s: %v", idx, path, err)
 				continue
@@ -515,7 +515,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["page_number"] = int64(chunk.PageNumber)
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk.Content, iw.customStopWords)
+			sIndices, sValues := ComputeSparseVector(chunk.Content, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -530,7 +530,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 		// Fall back to basic sliding window line chunking
 		chunks := iw.chunkText(string(content), 1000)
 		for idx, chunk := range chunks {
-			vector, err := iw.fetchRemoteEmbedding(ctx, chunk)
+			vector, err := iw.FetchRemoteEmbedding(ctx, chunk)
 			if err != nil {
 				log.Printf("Ollama vectorization failed on remote endpoint: %v", err)
 				continue
@@ -552,7 +552,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"updated":       time.Now().Unix(),
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk, iw.customStopWords)
+			sIndices, sValues := ComputeSparseVector(chunk, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
@@ -567,15 +567,15 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 
 	if len(points) > 0 {
 		for _, p := range points {
-			iw.batchUpserter.Add(p)
+			iw.BatchUpserter.Add(p)
 		}
 		log.Printf("Successfully queued %d vectors for %s (AST parsed: %t)", len(points), path, len(functions) > 0)
 	}
 }
 
 func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, path string) error {
-	_, err := iw.qdrantClient.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: iw.cfg.CollectionName,
+	_, err := iw.QdrantClient.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: iw.Cfg.CollectionName,
 		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
 			Must: []*qdrant.Condition{
 				qdrant.NewMatchKeyword("file_path", path),
@@ -587,23 +587,23 @@ func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, path string) er
 
 func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 	// 1. Ensure the dedicated collection exists
-	exists, err := iw.qdrantClient.CollectionExists(ctx, iw.cfg.CollectionName)
+	exists, err := iw.QdrantClient.CollectionExists(ctx, iw.Cfg.CollectionName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to check collection existence: %w", err)
 	}
 
 	if !exists {
 		// Call Ollama to determine embedding dimension size dynamically
-		dummyVector, err := iw.fetchRemoteEmbedding(ctx, "hello")
+		dummyVector, err := iw.FetchRemoteEmbedding(ctx, "hello")
 		if err != nil {
 			return 0, fmt.Errorf("failed to fetch dummy embedding from Ollama model '%s' at %s: %w",
-				iw.cfg.EmbeddingModel, iw.cfg.OllamaHost, err)
+				iw.Cfg.EmbeddingModel, iw.Cfg.OllamaHost, err)
 		}
 		dimension := uint64(len(dummyVector))
-		log.Printf("Collection '%s' does not exist. Creating it with dimension size %d...", iw.cfg.CollectionName, dimension)
+		log.Printf("Collection '%s' does not exist. Creating it with dimension size %d...", iw.Cfg.CollectionName, dimension)
 
-		err = iw.qdrantClient.CreateCollection(ctx, &qdrant.CreateCollection{
-			CollectionName: iw.cfg.CollectionName,
+		err = iw.QdrantClient.CreateCollection(ctx, &qdrant.CreateCollection{
+			CollectionName: iw.Cfg.CollectionName,
 			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
 				Size:     dimension,
 				Distance: qdrant.Distance_Cosine,
@@ -613,14 +613,14 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 			}),
 		})
 		if err != nil {
-			return 0, fmt.Errorf("failed to create Qdrant collection '%s': %w", iw.cfg.CollectionName, err)
+			return 0, fmt.Errorf("failed to create Qdrant collection '%s': %w", iw.Cfg.CollectionName, err)
 		}
-		log.Printf("Collection '%s' successfully created.", iw.cfg.CollectionName)
+		log.Printf("Collection '%s' successfully created.", iw.Cfg.CollectionName)
 	}
 
 	// 2. Discover files
 	var filesToIngest []string
-	err = filepath.WalkDir(iw.cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(iw.Cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
 		if strings.Contains(path, ".qdrant-mcp-server.log") {
 			return nil
 		}
@@ -629,27 +629,27 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		}
 		if d.IsDir() {
 			// Respect .gitignore
-			if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, true) {
+			if iw.GitignoreMatcher != nil && iw.GitignoreMatcher.IsIgnored(path, true) {
 				return filepath.SkipDir
 			}
 
 			base := d.Name()
-			if sliceContains(iw.cfg.ExcludeDirs, base) {
+			if sliceContains(iw.Cfg.ExcludeDirs, base) {
 				return filepath.SkipDir
 			}
 			if strings.HasPrefix(base, ".") && base != "." {
-				if !sliceContains(iw.cfg.IncludeHiddenDirs, base) {
+				if !sliceContains(iw.Cfg.IncludeHiddenDirs, base) {
 					return filepath.SkipDir
 				}
 			}
 		} else {
 			// Respect .gitignore
-			if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, false) {
+			if iw.GitignoreMatcher != nil && iw.GitignoreMatcher.IsIgnored(path, false) {
 				return nil
 			}
 			baseName := d.Name()
 			isAllowedHiddenPath := false
-			for _, allowedDir := range iw.cfg.IncludeHiddenDirs {
+			for _, allowedDir := range iw.Cfg.IncludeHiddenDirs {
 				if strings.Contains(path, "/"+allowedDir+"/") {
 					isAllowedHiddenPath = true
 					break
@@ -668,44 +668,44 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("error walking watch directory: %w", err)
 	}
 
-	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), iw.cfg.MaxEmbeddingWorkers)
+	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), iw.Cfg.MaxEmbeddingWorkers)
 	var wg sync.WaitGroup
 	for i, path := range filesToIngest {
 		wg.Add(1)
 		go func(idx int, p string) {
 			defer wg.Done()
 			log.Printf("[%d/%d] Ingesting %s...", idx+1, len(filesToIngest), p)
-			iw.syncFileState(ctx, p)
+			iw.SyncFileState(ctx, p)
 		}(i, path)
 	}
 	wg.Wait()
 
 	log.Println("Flushing remaining vector batches to Qdrant...")
-	iw.batchUpserter.Flush()
+	iw.BatchUpserter.Flush()
 
 	return len(filesToIngest), nil
 }
 
-func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string) ([]float32, error) {
+func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string) ([]float32, error) {
 	var lastErr error
 	backoff := 100 * time.Millisecond
 
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := iw.concurrencyController.Acquire(ctx); err != nil {
+		if err := iw.ConcurrencyController.Acquire(ctx); err != nil {
 			return nil, err
 		}
 
 		startTime := time.Now()
-		payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.cfg.EmbeddingModel, Prompt: text})
-		req, _ := http.NewRequestWithContext(ctx, "POST", iw.cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
+		payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.Cfg.EmbeddingModel, Prompt: text})
+		req, _ := http.NewRequestWithContext(ctx, "POST", iw.Cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := iw.httpClient.Do(req)
+		resp, err := iw.HTTPClient.Do(req)
 		duration := time.Since(startTime)
 
 		if err != nil {
-			iw.concurrencyController.RecordFailure("HTTP client error: " + err.Error())
-			iw.concurrencyController.Release()
+			iw.ConcurrencyController.RecordFailure("HTTP client error: " + err.Error())
+			iw.ConcurrencyController.Release()
 			lastErr = err
 
 			select {
@@ -720,8 +720,8 @@ func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			iw.concurrencyController.RecordFailure(fmt.Sprintf("Ollama overloaded: HTTP %d", resp.StatusCode))
-			iw.concurrencyController.Release()
+			iw.ConcurrencyController.RecordFailure(fmt.Sprintf("Ollama overloaded: HTTP %d", resp.StatusCode))
+			iw.ConcurrencyController.Release()
 			lastErr = fmt.Errorf("ollama overloaded: HTTP %d", resp.StatusCode)
 
 			select {
@@ -734,8 +734,8 @@ func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			iw.concurrencyController.RecordFailure(fmt.Sprintf("HTTP error status: %d", resp.StatusCode))
-			iw.concurrencyController.Release()
+			iw.ConcurrencyController.RecordFailure(fmt.Sprintf("HTTP error status: %d", resp.StatusCode))
+			iw.ConcurrencyController.Release()
 			lastErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
 
 			select {
@@ -749,8 +749,8 @@ func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string
 
 		var out OllamaEmbedResp
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			iw.concurrencyController.RecordFailure("JSON decode error")
-			iw.concurrencyController.Release()
+			iw.ConcurrencyController.RecordFailure("JSON decode error")
+			iw.ConcurrencyController.Release()
 			lastErr = err
 
 			select {
@@ -763,8 +763,8 @@ func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string
 		}
 
 		// Success!
-		iw.concurrencyController.RecordSuccess(duration)
-		iw.concurrencyController.Release()
+		iw.ConcurrencyController.RecordSuccess(duration)
+		iw.ConcurrencyController.Release()
 		return out.Embedding, nil
 	}
 
@@ -790,9 +790,9 @@ func (iw *IngestionWorker) chunkText(text string, size int) []string {
 	return chunks
 }
 
-func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string) (string, error) {
+func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string) (string, error) {
 	// Step A: Vectorize the search query using your home lab Ollama endpoint
-	vector, err := iw.fetchRemoteEmbedding(ctx, query)
+	vector, err := iw.FetchRemoteEmbedding(ctx, query)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
 	}
@@ -834,16 +834,16 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 	var queryResponse []*qdrant.ScoredPoint
 	var queryResponseErr error
 
-	searchMode := strings.ToLower(strings.TrimSpace(iw.cfg.SearchMode))
+	searchMode := strings.ToLower(strings.TrimSpace(iw.Cfg.SearchMode))
 	if searchMode == "" {
 		searchMode = "dense"
 	}
 
 	switch searchMode {
 	case "sparse":
-		sIndices, sValues := ComputeSparseVector(query, iw.customStopWords)
-		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
-			CollectionName: iw.cfg.CollectionName,
+		sIndices, sValues := ComputeSparseVector(query, iw.CustomStopWords)
+		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQuerySparse(sIndices, sValues),
 			Limit:          qdrant.PtrOf(uint64(5)),
 			Filter:         qdrantFilter,
@@ -851,9 +851,9 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 			Using:          qdrant.PtrOf("sparse"),
 		})
 	case "hybrid":
-		sIndices, sValues := ComputeSparseVector(query, iw.customStopWords)
-		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
-			CollectionName: iw.cfg.CollectionName,
+		sIndices, sValues := ComputeSparseVector(query, iw.CustomStopWords)
+		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.Cfg.CollectionName,
 			Prefetch: []*qdrant.PrefetchQuery{
 				{
 					Query:  qdrant.NewQueryDense(vector),
@@ -872,8 +872,8 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 			WithPayload: qdrant.NewWithPayloadEnable(true),
 		})
 	default: // "dense" or fallback
-		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
-			CollectionName: iw.cfg.CollectionName,
+		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQueryDense(vector),
 			Limit:          qdrant.PtrOf(uint64(5)),
 			Filter:         qdrantFilter,

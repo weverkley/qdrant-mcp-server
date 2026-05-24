@@ -1,9 +1,11 @@
-package main
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"qdrant-mcp-server/server"
 )
 
 func TestGitIgnoreMatcher(t *testing.T) {
@@ -40,7 +42,7 @@ nested_ignored.txt
 	}
 
 	// Instantiate the matcher
-	matcher := NewGitIgnoreMatcher(tmpDir)
+	matcher := server.NewGitIgnoreMatcher(tmpDir)
 
 	tests := []struct {
 		path    string

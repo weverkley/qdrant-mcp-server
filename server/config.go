@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"encoding/json"
@@ -31,7 +31,7 @@ type Config struct {
 }
 
 
-func loadConfig() Config {
+func LoadConfig() Config {
 	host := os.Getenv("QDRANT_HOST")
 	if host == "" {
 		host = "172.20.0.5"
@@ -157,7 +157,7 @@ func PreprocessConfig() {
 	}
 
 	// 2. Parse explicit CLI flags/parameters first.
-	cliEnvVars := parseCLIFlags(os.Args[1:])
+	cliEnvVars := ParseCLIFlags(os.Args[1:])
 
 	// Set CLI variables inside the process environment.
 	// We also record them so we know they were explicitly specified by the user.
@@ -195,7 +195,7 @@ func PreprocessConfig() {
 	}
 }
 
-func parseCLIFlags(args []string) map[string]string {
+func ParseCLIFlags(args []string) map[string]string {
 	flags := make(map[string]string)
 	
 	// Map of flag names to environment variable names
@@ -257,7 +257,7 @@ func discoverConfigs(cliEnv map[string]string, shellEnv map[string]bool) map[str
 	home, err := os.UserHomeDir()
 	if err == nil {
 		userClaudePath := filepath.Join(home, ".claude", "settings.json")
-		if vars := loadJsonConfig(userClaudePath); len(vars) > 0 {
+		if vars := LoadJsonConfig(userClaudePath); len(vars) > 0 {
 			mergeMaps(discovered, vars)
 		}
 	}
@@ -269,31 +269,31 @@ func discoverConfigs(cliEnv map[string]string, shellEnv map[string]bool) map[str
 		for {
 			// Look for .mcp.json or mcp.json
 			mcpJsonPath := filepath.Join(dir, ".mcp.json")
-			if vars := loadJsonConfig(mcpJsonPath); len(vars) > 0 {
+			if vars := LoadJsonConfig(mcpJsonPath); len(vars) > 0 {
 				mergeMaps(discovered, vars)
 				break
 			}
 			mcpJsonPath2 := filepath.Join(dir, "mcp.json")
-			if vars := loadJsonConfig(mcpJsonPath2); len(vars) > 0 {
+			if vars := LoadJsonConfig(mcpJsonPath2); len(vars) > 0 {
 				mergeMaps(discovered, vars)
 				break
 			}
 
 			// Look for .claude/settings.local.json
 			claudeLocalPath := filepath.Join(dir, ".claude", "settings.local.json")
-			if vars := loadJsonConfig(claudeLocalPath); len(vars) > 0 {
+			if vars := LoadJsonConfig(claudeLocalPath); len(vars) > 0 {
 				mergeMaps(discovered, vars)
 				break
 			}
 
 			// Look for .codex/config.toml or config.toml
 			tomlPath := filepath.Join(dir, ".codex", "config.toml")
-			if vars := loadTomlConfig(tomlPath); len(vars) > 0 {
+			if vars := LoadTomlConfig(tomlPath); len(vars) > 0 {
 				mergeMaps(discovered, vars)
 				break
 			}
 			tomlPath2 := filepath.Join(dir, "config.toml")
-			if vars := loadTomlConfig(tomlPath2); len(vars) > 0 {
+			if vars := LoadTomlConfig(tomlPath2); len(vars) > 0 {
 				mergeMaps(discovered, vars)
 				break
 			}
@@ -316,7 +316,7 @@ func mergeMaps(dest, src map[string]string) {
 	}
 }
 
-func loadJsonConfig(path string) map[string]string {
+func LoadJsonConfig(path string) map[string]string {
 	vars := make(map[string]string)
 
 	file, err := os.Open(path)
@@ -411,7 +411,7 @@ func loadJsonConfig(path string) map[string]string {
 	return vars
 }
 
-func loadTomlConfig(path string) map[string]string {
+func LoadTomlConfig(path string) map[string]string {
 	vars := make(map[string]string)
 
 	file, err := os.Open(path)
