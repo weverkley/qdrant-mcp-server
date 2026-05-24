@@ -78,7 +78,7 @@ The server relies on the following environment variables for its configuration:
 | `MAX_EMBEDDING_WORKERS` | Max concurrent worker threads doing Ollama embeddings. | `5` | No |
 | `BATCH_SIZE` | Batch size for vector upserts. | `100` | No |
 | `BATCH_TIMEOUT` | Batch timeout for vector upserts (e.g. `200ms`, `1s`). | `200ms` | No |
-| `LOG_TO_FILE` | Enable logging to `.qdrant-mcp-server.log` physical file. | `false` | No |
+| `LOG_TO_FILE` | Enable logging to `.qdrant-mcp-server/qdrant-mcp-server.log` physical file. | `false` | No |
 | `SEARCH_MODE` | Vector search mode: `dense` (pure semantic), `sparse` (precise keyword), or `hybrid` (dense + sparse combined using Reciprocal Rank Fusion RRF). | `dense` | No |
 
 ---
@@ -165,7 +165,7 @@ qdrant-mcp-server ingest -c my-collection -w ./ -o http://172.20.0.5:11434 -e no
 - `--max-workers`, `-mw <number>`: Max concurrent embedding workers (`MAX_EMBEDDING_WORKERS`)
 - --batch-size, -bs <number>: Batch size for vector upserts (`BATCH_SIZE`, default: 100)
 - --batch-timeout, -bt <duration>: Batch timeout for vector upserts (`BATCH_TIMEOUT`, default: 200ms)
-- --log-to-file, -lf <bool>: Enable log output to physical file (`LOG_TO_FILE`, default: false)
+- --log-to-file, -lf <bool>: Enable log output to physical file (`LOG_TO_FILE`, default: false, saved to `.qdrant-mcp-server/qdrant-mcp-server.log`)
 - --search-mode, -sm <mode>: Vector search mode: `dense`, `sparse`, or `hybrid` (`SEARCH_MODE`, default: dense)
 
 ---
@@ -292,12 +292,13 @@ Out of the box, the server identifies and automatically excludes grammatical noi
 This keeps sparse index weights highly focused on meaningful keywords even when operating in multilingual environments or indexing localized codebase documentation.
 
 ### 🛠️ Workspace-Level Custom Stop-Words
-For project-specific rules—like ignoring boilerplate framework imports, common logging verbs, or package namespaces—you can place a custom `.mcp-stopwords` file directly in the root of your configured `WATCH_DIRECTORY`.
+For project-specific rules—like ignoring boilerplate framework imports, common logging verbs, or package namespaces—you can place a custom `.mcp-stopwords` file inside the dedicated `.qdrant-mcp-server` directory (or at the root of your configured `WATCH_DIRECTORY` as a legacy fallback).
 
 #### How it works:
-1. Create a file named `.mcp-stopwords` in your active project root.
-2. Add one stop-word per line.
-3. Blank lines and lines starting with `#` are treated as comments and skipped automatically.
+1. Create a folder named `.qdrant-mcp-server` in your active project root.
+2. Inside it, create a file named `.mcp-stopwords`.
+3. Add one stop-word per line.
+4. Blank lines and lines starting with `#` are treated as comments and skipped automatically.
 
 #### Example `.mcp-stopwords` file:
 ```text

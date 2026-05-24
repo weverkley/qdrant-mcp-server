@@ -21,8 +21,8 @@ func (iw *IngestionWorker) WatchLoop(ctx context.Context, watcher *fsnotify.Watc
 				return
 			}
 
-			// NEVER ingest the log file
-			if strings.Contains(event.Name, ".qdrant-mcp-server.log") {
+			// NEVER ingest the log file or its dedicated directory files
+			if strings.Contains(event.Name, ".qdrant-mcp-server") {
 				continue
 			}
 
@@ -65,8 +65,8 @@ func (iw *IngestionWorker) IngestionConsumer(ctx context.Context, eventChan <-ch
 		case <-ctx.Done():
 			return
 		case path := <-eventChan:
-			// NEVER ingest the log file
-			if strings.Contains(path, ".qdrant-mcp-server.log") {
+			// NEVER ingest the log file or its dedicated directory files
+			if strings.Contains(path, ".qdrant-mcp-server") {
 				continue
 			}
 

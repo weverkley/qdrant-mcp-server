@@ -288,11 +288,17 @@ type IngestionWorker struct {
 }
 
 func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
-	// Look for .mcp-stopwords in cfg.WatchDirectory
+	// Look for .mcp-stopwords in cfg.WatchDirectory/.qdrant-mcp-server/ or cfg.WatchDirectory
 	customStopWords := make(map[string]struct{})
 	if cfg.WatchDirectory != "" {
-		stopWordsPath := filepath.Join(cfg.WatchDirectory, ".mcp-stopwords")
-		if data, err := os.ReadFile(stopWordsPath); err == nil {
+		stopWordsPath := filepath.Join(cfg.WatchDirectory, ".qdrant-mcp-server", ".mcp-stopwords")
+		data, err := os.ReadFile(stopWordsPath)
+		if err != nil {
+			// Fallback to legacy root location
+			stopWordsPath = filepath.Join(cfg.WatchDirectory, ".mcp-stopwords")
+			data, err = os.ReadFile(stopWordsPath)
+		}
+		if err == nil {
 			lines := strings.Split(string(data), "\n")
 			for _, line := range lines {
 				token := strings.ToLower(strings.TrimSpace(line))
@@ -336,7 +342,7 @@ type OllamaEmbedResp struct {
 }
 
 func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
-	if strings.Contains(path, ".qdrant-mcp-server.log") {
+	if strings.Contains(path, ".qdrant-mcp-server") {
 		return
 	}
 	if iw.GitignoreMatcher != nil && iw.GitignoreMatcher.IsIgnored(path, false) {
@@ -621,7 +627,10 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 	// 2. Discover files
 	var filesToIngest []string
 	err = filepath.WalkDir(iw.Cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
-		if strings.Contains(path, ".qdrant-mcp-server.log") {
+		if strings.Contains(path, ".qdrant-mcp-server") {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if err != nil {

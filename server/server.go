@@ -28,9 +28,14 @@ func Start(version string) {
 	// Configure physical log file if option enabled
 	cfg := LoadConfig()
 	if cfg.LogToFile {
-		logFile, err := os.OpenFile(".qdrant-mcp-server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		dirPath := ".qdrant-mcp-server"
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			log.Printf("Warning: Failed to create log directory '%s': %v", dirPath, err)
+		}
+		logFilePath := filepath.Join(dirPath, "qdrant-mcp-server.log")
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
-			log.Printf("Warning: Failed to open log file: %v", err)
+			log.Printf("Warning: Failed to open log file '%s': %v", logFilePath, err)
 		} else {
 			log.SetOutput(logFile)
 			log.Println("--- Log Session Started ---")

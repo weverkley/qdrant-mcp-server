@@ -460,7 +460,7 @@ func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
 	}
 }
 
-func TestSyncFileState_IgnoreLogFile(t *testing.T) {
+func TestSyncFileState_IgnoreLogAndConfigFolder(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	Cfg := server.Config{
 		CollectionName:      "test-collection",
@@ -473,15 +473,26 @@ func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
 	defer worker.Close()
 
+	// Test absolute legacy file path
 	logPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server.log")
 	worker.SyncFileState(context.Background(), logPath)
+
+	// Test path inside the dedicated folder
+	dedicatedLogPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server", "qdrant-mcp-server.log")
+	worker.SyncFileState(context.Background(), dedicatedLogPath)
+
+	dedicatedStopWordsPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server", ".mcp-stopwords")
+	worker.SyncFileState(context.Background(), dedicatedStopWordsPath)
+
+	dedicatedRandomPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server", "some-other-file.go")
+	worker.SyncFileState(context.Background(), dedicatedRandomPath)
 
 	mockClient.mu.Lock()
 	upsertCount := len(mockClient.upsertCalls)
 	mockClient.mu.Unlock()
 
 	if upsertCount != 0 {
-		t.Fatalf("Expected log file to be completely ignored and never upserted, got %d upserts", upsertCount)
+		t.Fatalf("Expected log file and .qdrant-mcp-server folder content to be completely ignored, got %d upserts", upsertCount)
 	}
 }
 
