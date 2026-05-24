@@ -64,12 +64,15 @@ func main() {
 			}
 			defer client.Close()
 
+			gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
+
 			worker := &IngestionWorker{
-				cfg:          cfg,
-				qdrantClient: client,
-				httpClient:   &http.Client{Timeout: 15 * time.Second},
-				pendingFiles: make(map[string]time.Time),
-				sem:          make(chan struct{}, cfg.MaxEmbeddingWorkers),
+				cfg:              cfg,
+				qdrantClient:     client,
+				httpClient:       &http.Client{Timeout: 15 * time.Second},
+				pendingFiles:     make(map[string]time.Time),
+				sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
+				gitignoreMatcher: gitIgnore,
 			}
 
 			log.Println("Starting manual codebase ingestion...")
@@ -103,12 +106,15 @@ func main() {
 	}
 	defer client.Close()
 
+	gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
+
 	worker := &IngestionWorker{
-		cfg:          cfg,
-		qdrantClient: client,
-		httpClient:   &http.Client{Timeout: 15 * time.Second},
-		pendingFiles: make(map[string]time.Time),
-		sem:          make(chan struct{}, cfg.MaxEmbeddingWorkers),
+		cfg:              cfg,
+		qdrantClient:     client,
+		httpClient:       &http.Client{Timeout: 15 * time.Second},
+		pendingFiles:     make(map[string]time.Time),
+		sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
+		gitignoreMatcher: gitIgnore,
 	}
 
 	// Boot active structural watcher
@@ -133,6 +139,11 @@ func main() {
 		}
 
 		if d.IsDir() {
+			// Respect .gitignore
+			if gitIgnore.IsIgnored(path, true) {
+				return filepath.SkipDir
+			}
+
 			base := d.Name()
 
 			// 1. Drop standard target blacklisted directory paths (e.g. node_modules)

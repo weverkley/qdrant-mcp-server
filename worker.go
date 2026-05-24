@@ -23,14 +23,15 @@ import (
 
 // --- Ingestion Structural Blocks ---
 type IngestionWorker struct {
-	cfg          Config
-	qdrantClient *qdrant.Client
-	httpClient   *http.Client
-	mu           sync.Mutex
-	pendingFiles map[string]time.Time
-	activeSyncs  int
-	totalSynced  int
-	sem          chan struct{} // semaphore to rate limit concurrent embedding workers
+	cfg              Config
+	qdrantClient     *qdrant.Client
+	httpClient       *http.Client
+	mu               sync.Mutex
+	pendingFiles     map[string]time.Time
+	activeSyncs      int
+	totalSynced      int
+	sem              chan struct{} // semaphore to rate limit concurrent embedding workers
+	gitignoreMatcher *GitIgnoreMatcher
 }
 
 type OllamaEmbedReq struct {
@@ -43,6 +44,9 @@ type OllamaEmbedResp struct {
 }
 
 func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
+	if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, false) {
+		return
+	}
 	if iw.sem != nil {
 		select {
 		case iw.sem <- struct{}{}:
@@ -288,6 +292,11 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 			return err
 		}
 		if d.IsDir() {
+			// Respect .gitignore
+			if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, true) {
+				return filepath.SkipDir
+			}
+
 			base := d.Name()
 			if sliceContains(iw.cfg.ExcludeDirs, base) {
 				return filepath.SkipDir
@@ -298,6 +307,10 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 				}
 			}
 		} else {
+			// Respect .gitignore
+			if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, false) {
+				return nil
+			}
 			baseName := d.Name()
 			isAllowedHiddenPath := false
 			for _, allowedDir := range iw.cfg.IncludeHiddenDirs {
