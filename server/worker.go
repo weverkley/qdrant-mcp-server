@@ -312,17 +312,22 @@ func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgn
 		}
 	}
 
+	maxWorkers := cfg.MaxEmbeddingWorkers
+	if maxWorkers <= 0 {
+		maxWorkers = 5
+	}
+
 	iw := &IngestionWorker{
 		Cfg:              cfg,
 		QdrantClient:     qdrantClient,
 		HTTPClient:       &http.Client{Timeout: 15 * time.Second},
 		PendingFiles:     make(map[string]time.Time),
-		Sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
+		Sem:              make(chan struct{}, maxWorkers),
 		GitignoreMatcher: gitIgnore,
 		CustomStopWords:  customStopWords,
 	}
 	iw.BatchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
-	iw.ConcurrencyController = NewConcurrencyController(cfg.MaxEmbeddingWorkers)
+	iw.ConcurrencyController = NewConcurrencyController(maxWorkers)
 	return iw
 }
 
