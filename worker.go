@@ -22,9 +22,144 @@ import (
 )
 
 // --- Ingestion Structural Blocks ---
+type QdrantClient interface {
+	Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error)
+	Delete(ctx context.Context, in *qdrant.DeletePoints) (*qdrant.UpdateResult, error)
+	CollectionExists(ctx context.Context, collectionName string) (bool, error)
+	CreateCollection(ctx context.Context, in *qdrant.CreateCollection) error
+	Query(ctx context.Context, in *qdrant.QueryPoints) ([]*qdrant.ScoredPoint, error)
+}
+
+type BatchUpserter struct {
+	qdrantClient   QdrantClient
+	collectionName string
+	batchSize      int
+	timeout        time.Duration
+	ch             chan *qdrant.PointStruct
+	flushCh        chan chan struct{}
+	wg             sync.WaitGroup
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan struct{}
+}
+
+func NewBatchUpserter(qdrantClient QdrantClient, collectionName string, batchSize int, timeout time.Duration) *BatchUpserter {
+	ctx, cancel := context.WithCancel(context.Background())
+	b := &BatchUpserter{
+		qdrantClient:   qdrantClient,
+		collectionName: collectionName,
+		batchSize:      batchSize,
+		timeout:        timeout,
+		ch:             make(chan *qdrant.PointStruct, batchSize*2),
+		flushCh:        make(chan chan struct{}),
+		done:           make(chan struct{}),
+		ctx:            ctx,
+		cancel:         cancel,
+	}
+	b.start()
+	return b
+}
+
+func (b *BatchUpserter) start() {
+	go func() {
+		defer close(b.done)
+
+		ticker := time.NewTicker(b.timeout)
+		defer ticker.Stop()
+
+		var batch []*qdrant.PointStruct
+
+		drainQueue := func() {
+			for {
+				select {
+				case p, ok := <-b.ch:
+					if !ok {
+						return
+					}
+					batch = append(batch, p)
+				default:
+					return
+				}
+			}
+		}
+
+		flushBatch := func() {
+			drainQueue()
+			if len(batch) == 0 {
+				return
+			}
+
+			_, err := b.qdrantClient.Upsert(context.Background(), &qdrant.UpsertPoints{
+				CollectionName: b.collectionName,
+				Points:         batch,
+			})
+			if err != nil {
+				log.Printf("gRPC Batch Upsert onto collection '%s' failed: %v", b.collectionName, err)
+			} else {
+				log.Printf("Successfully batch upserted %d vectors", len(batch))
+			}
+
+			for range batch {
+				b.wg.Done()
+			}
+			batch = nil
+		}
+
+		for {
+			select {
+			case <-b.ctx.Done():
+				flushBatch()
+				return
+			case p, ok := <-b.ch:
+				if !ok {
+					flushBatch()
+					return
+				}
+				batch = append(batch, p)
+				if len(batch) >= b.batchSize {
+					flushBatch()
+					ticker.Reset(b.timeout)
+				}
+			case <-ticker.C:
+				if len(batch) > 0 {
+					flushBatch()
+				}
+			case reply := <-b.flushCh:
+				flushBatch()
+				close(reply)
+			}
+		}
+	}()
+}
+
+func (b *BatchUpserter) Add(p *qdrant.PointStruct) {
+	b.wg.Add(1)
+	select {
+	case b.ch <- p:
+	case <-b.ctx.Done():
+		b.wg.Done()
+	}
+}
+
+func (b *BatchUpserter) Flush() {
+	reply := make(chan struct{})
+	select {
+	case b.flushCh <- reply:
+		<-reply
+	case <-b.ctx.Done():
+		return
+	}
+	b.wg.Wait()
+}
+
+func (b *BatchUpserter) Close() {
+	b.cancel()
+	<-b.done
+}
+
 type IngestionWorker struct {
 	cfg              Config
-	qdrantClient     *qdrant.Client
+	qdrantClient     QdrantClient
 	httpClient       *http.Client
 	mu               sync.Mutex
 	pendingFiles     map[string]time.Time
@@ -32,6 +167,26 @@ type IngestionWorker struct {
 	totalSynced      int
 	sem              chan struct{} // semaphore to rate limit concurrent embedding workers
 	gitignoreMatcher *GitIgnoreMatcher
+	batchUpserter    *BatchUpserter
+}
+
+func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
+	iw := &IngestionWorker{
+		cfg:              cfg,
+		qdrantClient:     qdrantClient,
+		httpClient:       &http.Client{Timeout: 15 * time.Second},
+		pendingFiles:     make(map[string]time.Time),
+		sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
+		gitignoreMatcher: gitIgnore,
+	}
+	iw.batchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
+	return iw
+}
+
+func (iw *IngestionWorker) Close() {
+	if iw.batchUpserter != nil {
+		iw.batchUpserter.Close()
+	}
 }
 
 type OllamaEmbedReq struct {
@@ -231,15 +386,10 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 	}
 
 	if len(points) > 0 {
-		_, err = iw.qdrantClient.Upsert(ctx, &qdrant.UpsertPoints{
-			CollectionName: iw.cfg.CollectionName,
-			Points:         points,
-		})
-		if err != nil {
-			log.Printf("gRPC Batch Upsert onto collection '%s' failed: %v", iw.cfg.CollectionName, err)
-		} else {
-			log.Printf("Successfully synchronized %d vectors for %s (AST parsed: %t)", len(points), path, len(functions) > 0)
+		for _, p := range points {
+			iw.batchUpserter.Add(p)
 		}
+		log.Printf("Successfully queued %d vectors for %s (AST parsed: %t)", len(points), path, len(functions) > 0)
 	}
 }
 
@@ -343,6 +493,9 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		}(i, path)
 	}
 	wg.Wait()
+
+	log.Println("Flushing remaining vector batches to Qdrant...")
+	iw.batchUpserter.Flush()
 
 	return len(filesToIngest), nil
 }

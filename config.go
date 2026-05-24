@@ -24,7 +24,10 @@ type Config struct {
 	IncludeHiddenDirs []string
 	ParserMode        string // "code", "doc", or "full" (default)
 	MaxEmbeddingWorkers int    // maximum concurrent embedding workers (default: 5)
+	BatchSize         int           // batch size for vector upserts (default: 100)
+	BatchTimeout      time.Duration // batch timeout for vector upserts (default: 200ms)
 }
+
 
 func loadConfig() Config {
 	host := os.Getenv("QDRANT_HOST")
@@ -71,6 +74,24 @@ func loadConfig() Config {
 		}
 	}
 
+	batchSize := 100
+	if batchSizeStr := os.Getenv("BATCH_SIZE"); batchSizeStr != "" {
+		if b, err := strconv.Atoi(batchSizeStr); err == nil && b > 0 {
+			batchSize = b
+		} else {
+			log.Printf("Warning: BATCH_SIZE '%s' is not a valid positive integer, falling back to default 100", batchSizeStr)
+		}
+	}
+
+	batchTimeout := 200 * time.Millisecond
+	if batchTimeoutStr := os.Getenv("BATCH_TIMEOUT"); batchTimeoutStr != "" {
+		if d, err := time.ParseDuration(batchTimeoutStr); err == nil && d > 0 {
+			batchTimeout = d
+		} else {
+			log.Printf("Warning: BATCH_TIMEOUT '%s' is not a valid duration, falling back to default 200ms", batchTimeoutStr)
+		}
+	}
+
 	return Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
@@ -83,6 +104,8 @@ func loadConfig() Config {
 		IncludeHiddenDirs:   parseEnvArray("INCLUDE_HIDDEN_DIRS"),
 		ParserMode:          parserMode,
 		MaxEmbeddingWorkers: maxWorkers,
+		BatchSize:           batchSize,
+		BatchTimeout:        batchTimeout,
 	}
 }
 
@@ -175,6 +198,10 @@ func parseCLIFlags(args []string) map[string]string {
 		"-pm":                  "PARSER_MODE",
 		"--max-workers":        "MAX_EMBEDDING_WORKERS",
 		"-mw":                  "MAX_EMBEDDING_WORKERS",
+		"--batch-size":         "BATCH_SIZE",
+		"-bs":                  "BATCH_SIZE",
+		"--batch-timeout":      "BATCH_TIMEOUT",
+		"-bt":                  "BATCH_TIMEOUT",
 	}
 
 	for i := 0; i < len(args); i++ {

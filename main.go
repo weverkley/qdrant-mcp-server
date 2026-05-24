@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -66,14 +65,8 @@ func main() {
 
 			gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
 
-			worker := &IngestionWorker{
-				cfg:              cfg,
-				qdrantClient:     client,
-				httpClient:       &http.Client{Timeout: 15 * time.Second},
-				pendingFiles:     make(map[string]time.Time),
-				sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
-				gitignoreMatcher: gitIgnore,
-			}
+			worker := NewIngestionWorker(cfg, client, gitIgnore)
+			defer worker.Close()
 
 			log.Println("Starting manual codebase ingestion...")
 			count, err := worker.SyncWorkspace(context.Background())
@@ -108,14 +101,8 @@ func main() {
 
 	gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
 
-	worker := &IngestionWorker{
-		cfg:              cfg,
-		qdrantClient:     client,
-		httpClient:       &http.Client{Timeout: 15 * time.Second},
-		pendingFiles:     make(map[string]time.Time),
-		sem:              make(chan struct{}, cfg.MaxEmbeddingWorkers),
-		gitignoreMatcher: gitIgnore,
-	}
+	worker := NewIngestionWorker(cfg, client, gitIgnore)
+	defer worker.Close()
 
 	// Boot active structural watcher
 	watcher, err := fsnotify.NewWatcher()
@@ -286,6 +273,8 @@ func printCLIHelp() {
 	fmt.Println("  --include-hidden-dirs, -ihd    Comma-separated hidden directories to watch")
 	fmt.Println("  --parser-mode, -pm <mode>      Parsing mode: 'code', 'doc', or 'full'")
 	fmt.Println("  --max-workers, -mw <num>       Maximum concurrent embedding threads")
+	fmt.Println("  --batch-size, -bs <num>        Batch size for vector upserts (default: 100)")
+	fmt.Println("  --batch-timeout, -bt <dur>     Batch timeout for vector upserts (default: 200ms)")
 	fmt.Println()
 	fmt.Println("\x1b[1;33mAuto-Discovery Feature:\x1b[0m")
 	fmt.Println("  The server automatically searches upwards from the current directory for")
@@ -302,5 +291,7 @@ func printCLIHelp() {
 	fmt.Println("  EMBEDDING_MODEL     Ollama model for embeddings (Required)")
 	fmt.Println("  PARSER_MODE         Parsing mode: code, doc, or full (default: full)")
 	fmt.Println("  MAX_EMBEDDING_WORKERS  Max concurrent embedding worker threads (default: 5)")
+	fmt.Println("  BATCH_SIZE          Batch size for vector upserts (default: 100)")
+	fmt.Println("  BATCH_TIMEOUT       Batch timeout for vector upserts (default: 200ms)")
 	fmt.Println("================================================================================")
 }
