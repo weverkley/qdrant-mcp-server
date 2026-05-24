@@ -26,8 +26,10 @@ type Config struct {
 	MaxEmbeddingWorkers int    // maximum concurrent embedding workers (default: 5)
 	BatchSize         int           // batch size for vector upserts (default: 100)
 	BatchTimeout      time.Duration // batch timeout for vector upserts (default: 200ms)
-	LogToFile         bool          // log output to physical file option (default: false)
-	SearchMode        string        // search mode: "dense", "sparse", or "hybrid" (default: "dense")
+	LogToFile           bool          // log output to physical file option (default: false)
+	SearchMode          string        // search mode: "dense", "sparse", or "hybrid" (default: "dense")
+	ExcludeExtensions   []string      // file extensions to exclude from indexing (default: .sql)
+	MaxFileSize         int64         // maximum file size in bytes to index (default: 1MB)
 }
 
 
@@ -112,6 +114,28 @@ func LoadConfig() Config {
 		}
 	}
 
+	excludeExts := parseEnvArray("EXCLUDE_EXTENSIONS")
+	if os.Getenv("EXCLUDE_EXTENSIONS") == "" {
+		// Provide .sql as a safe out-of-the-box default
+		excludeExts = []string{".sql"}
+	} else {
+		// Normalize extension formats (ensure leading dot exists)
+		for i, ext := range excludeExts {
+			if ext != "" && !strings.HasPrefix(ext, ".") {
+				excludeExts[i] = "." + ext
+			}
+		}
+	}
+
+	maxFileSize := int64(1024 * 1024) // 1MB default
+	if maxFileStr := os.Getenv("MAX_FILE_SIZE_BYTES"); maxFileStr != "" {
+		if m, err := strconv.ParseInt(maxFileStr, 10, 64); err == nil && m > 0 {
+			maxFileSize = m
+		} else {
+			log.Printf("Warning: MAX_FILE_SIZE_BYTES '%s' is not a valid positive integer, falling back to default 1MB", maxFileStr)
+		}
+	}
+
 	return Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
@@ -128,6 +152,8 @@ func LoadConfig() Config {
 		BatchTimeout:        batchTimeout,
 		LogToFile:           logToFile,
 		SearchMode:          searchMode,
+		ExcludeExtensions:   excludeExts,
+		MaxFileSize:         maxFileSize,
 	}
 }
 

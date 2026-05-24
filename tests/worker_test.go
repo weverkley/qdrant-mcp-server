@@ -683,5 +683,96 @@ func TestComputeSparseVector_CustomStopWords(t *testing.T) {
 	}
 }
 
+func TestShouldIgnoreFile(t *testing.T) {
+	mockClient := &MockQdrantClient{}
+	Cfg := server.Config{
+		ExcludeDirs: []string{"node_modules"},
+		IncludeHiddenDirs: []string{".allowed-hidden"},
+		ExcludeExtensions: []string{".sql", "json"},
+	}
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
+
+	tests := []struct {
+		path   string
+		isDir  bool
+		ignore bool
+	}{
+		// DB Migration patterns
+		{"/src/Migrations/AgroOpsDbContextModelSnapshot.cs", false, true},
+		{"/src/migrations/20260523131344_InitialCreate.Designer.cs", false, true},
+		{"/src/Migrations/20260523131344_InitialCreate.cs", false, true},
+		{"/src/Migrations", true, true},
+
+		// Designer and Snapshot patterns
+		{"/src/SomeFolder/AgroOpsDbContextModelSnapshot.cs", false, true},
+		{"/src/SomeFolder/InitialCreate.Designer.cs", false, true},
+		{"/src/SomeFolder/InitialCreate.designer.cs", false, true},
+
+		// Minified and map file patterns
+		{"/src/SomeFolder/app.min.js", false, true},
+		{"/src/SomeFolder/styles.min.css", false, true},
+		{"/src/SomeFolder/app.js.map", false, true},
+		{"/src/SomeFolder/styles.css.map", false, true},
+
+		// Custom Exclude extensions
+		{"/src/SomeFolder/schema.sql", false, true},
+		{"/src/SomeFolder/config.json", false, true},
+		{"/src/SomeFolder/config.yaml", false, false},
+
+		// Normal files & folders
+		{"/src/SomeFolder/NormalCode.cs", false, false},
+		{"/src/SomeFolder/NormalCode.go", false, false},
+		{"/src/SomeFolder", true, false},
+
+		// Hidden directories & allowed hidden directories
+		{"/src/.git", true, true},
+		{"/src/.allowed-hidden", true, false},
+		{"/src/.allowed-hidden/file.txt", false, false},
+	}
+
+	for _, tc := range tests {
+		res := worker.ShouldIgnoreFile(tc.path, tc.isDir)
+		if res != tc.ignore {
+			t.Errorf("ShouldIgnoreFile(%q, %t) = %t; want %t", tc.path, tc.isDir, res, tc.ignore)
+		}
+	}
+}
+
+func TestSyncFileState_MaxFileSize(t *testing.T) {
+	// Create a temp file
+	tempFile, err := os.CreateTemp("", "large_file_*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	content := "some file content that has some bytes"
+	if _, err := tempFile.WriteString(content); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tempFile.Close()
+
+	mockClient := &MockQdrantClient{}
+	Cfg := server.Config{
+		MaxFileSize: 10, // set very small limit
+	}
+	worker := server.NewIngestionWorker(Cfg, mockClient, nil)
+
+	ctx := context.Background()
+	// Call SyncFileState
+	worker.SyncFileState(ctx, tempFile.Name())
+
+	// Since the file is 37 bytes, and limit is 10, it should be skipped and no scroll or delete or upsert should be called.
+	mockClient.mu.Lock()
+	upsertCalls := len(mockClient.upsertCalls)
+	mockClient.mu.Unlock()
+
+	if upsertCalls != 0 {
+		t.Errorf("Expected 0 upsert calls (file skipped due to MaxFileSize), got %d", upsertCalls)
+	}
+}
+
+
+
 
 

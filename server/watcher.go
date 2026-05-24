@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"log"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -21,26 +19,7 @@ func (iw *IngestionWorker) WatchLoop(ctx context.Context, watcher *fsnotify.Watc
 				return
 			}
 
-			// NEVER ingest the log file or its dedicated directory files
-			if strings.Contains(event.Name, ".qdrant-mcp-server") {
-				continue
-			}
-
-			baseName := filepath.Base(event.Name)
-
-			// Dynamically determine if the event path matches any allowed hidden folder patterns
-			isAllowedHiddenPath := false
-			for _, allowedDir := range iw.Cfg.IncludeHiddenDirs {
-				if strings.Contains(event.Name, "/"+allowedDir+"/") {
-					isAllowedHiddenPath = true
-					break
-				}
-			}
-
-			// Guard against general hidden files unless they belong to an explicitly allowed tree
-			if (strings.HasPrefix(baseName, ".") && !isAllowedHiddenPath) ||
-				strings.HasPrefix(baseName, "~") ||
-				strings.HasSuffix(baseName, ".tmp") {
+			if iw.ShouldIgnoreFile(event.Name, false) {
 				continue
 			}
 
@@ -65,8 +44,7 @@ func (iw *IngestionWorker) IngestionConsumer(ctx context.Context, eventChan <-ch
 		case <-ctx.Done():
 			return
 		case path := <-eventChan:
-			// NEVER ingest the log file or its dedicated directory files
-			if strings.Contains(path, ".qdrant-mcp-server") {
+			if iw.ShouldIgnoreFile(path, false) {
 				continue
 			}
 

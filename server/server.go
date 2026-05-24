@@ -142,30 +142,15 @@ func Start(version string) {
 			return err
 		}
 
-		if d.IsDir() {
-			// Respect .gitignore
-			if gitIgnore.IsIgnored(path, true) {
+		isDir := d.IsDir()
+		if worker.ShouldIgnoreFile(path, isDir) {
+			if isDir {
 				return filepath.SkipDir
 			}
+			return nil
+		}
 
-			base := d.Name()
-
-			// 1. Drop standard target blacklisted directory paths (e.g. node_modules)
-			if sliceContains(cfg.ExcludeDirs, base) {
-				return filepath.SkipDir
-			}
-
-			// 2. Evaluate general hidden folder directory paths
-			if strings.HasPrefix(base, ".") && base != "." {
-				// If it explicitly lives in your inclusion array, step in and watch it
-				if sliceContains(cfg.IncludeHiddenDirs, base) {
-					log.Printf("Dynamic Filter: Watching explicit config directory: %s", path)
-					return watcher.Add(path)
-				}
-				// Otherwise skip it (.git, .obsidian, .codex)
-				return filepath.SkipDir
-			}
-
+		if isDir {
 			return watcher.Add(path)
 		}
 		return nil
