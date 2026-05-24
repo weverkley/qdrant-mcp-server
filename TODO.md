@@ -9,10 +9,10 @@ This document outlines the planned improvements, architectural enhancements, and
 - [x] **Rate-Limited Embedding Worker Pool**
   - Implement a buffered worker pool (e.g., maximum concurrent workers controlled by a `MAX_EMBEDDING_WORKERS` environment variable).
   - Prevent local Ollama engine thrashing and timeout errors during bulk changes (like git branch switches or initial indexing).
-- [ ] **Initial Startup Synchronization Crawler**
+- [x] **Initial Startup Synchronization Crawler**
   - Read files on startup and verify their status.
-  - Compare local file modification times (`mtime`) or content hashes with existing points in Qdrant.
-  - Automatically index newly created or modified files, and purge deleted paths *before* opening the filesystem notification loop.
+  - Compare content hashes (SHA-256) with existing points in Qdrant using Scroll query.
+  - Automatically index newly created or modified files, and skip indexing unchanged files completely before opening the filesystem notification loop.
 
 ---
 
@@ -64,5 +64,5 @@ This document outlines the planned improvements, architectural enhancements, and
 
 - [x] **Dynamic Progress Reporting**
   - Expose a simple status query tool (e.g. `get_sync_status`) so users can check if the workspace is fully indexed.
-- [ ] **Server Command Line Interface**
-  - Support execution flags (e.g., `--verbose`, `--dry-run`, or `--port`) when launching the binary directly from terminal setups.
+- [x] **Server Command Line Interface**
+  - Support execution flags (e.g. `--batch-size`, `--batch-timeout`, `--log-to-file`) when launching the binary directly from terminal setups.

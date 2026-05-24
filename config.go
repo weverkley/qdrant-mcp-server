@@ -26,6 +26,7 @@ type Config struct {
 	MaxEmbeddingWorkers int    // maximum concurrent embedding workers (default: 5)
 	BatchSize         int           // batch size for vector upserts (default: 100)
 	BatchTimeout      time.Duration // batch timeout for vector upserts (default: 200ms)
+	LogToFile         bool          // log output to physical file option (default: false)
 }
 
 
@@ -92,6 +93,15 @@ func loadConfig() Config {
 		}
 	}
 
+	logToFile := false
+	if logToFileStr := os.Getenv("LOG_TO_FILE"); logToFileStr != "" {
+		if b, err := strconv.ParseBool(logToFileStr); err == nil {
+			logToFile = b
+		} else {
+			log.Printf("Warning: LOG_TO_FILE '%s' is not a valid boolean, falling back to default false", logToFileStr)
+		}
+	}
+
 	return Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
@@ -106,6 +116,7 @@ func loadConfig() Config {
 		MaxEmbeddingWorkers: maxWorkers,
 		BatchSize:           batchSize,
 		BatchTimeout:        batchTimeout,
+		LogToFile:           logToFile,
 	}
 }
 
@@ -202,6 +213,8 @@ func parseCLIFlags(args []string) map[string]string {
 		"-bs":                  "BATCH_SIZE",
 		"--batch-timeout":      "BATCH_TIMEOUT",
 		"-bt":                  "BATCH_TIMEOUT",
+		"--log-to-file":        "LOG_TO_FILE",
+		"-lf":                  "LOG_TO_FILE",
 	}
 
 	for i := 0; i < len(args); i++ {

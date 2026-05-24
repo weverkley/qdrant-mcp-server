@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -352,4 +353,130 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		t.Fatalf("Expected 1 delete call when hash does not match, got %d", staleDeleteCount)
 	}
 }
+
+func TestConcurrencyController_AIMD(t *testing.T) {
+	c := NewConcurrencyController(4)
+
+	// Verify initial limit is max
+	if limit := c.GetLimit(); limit != 4 {
+		t.Fatalf("Expected limit 4, got %d", limit)
+	}
+
+	// Record failures to check decrease
+	c.RecordFailure("OOM error") // Halves to 2
+	if limit := c.GetLimit(); limit != 2 {
+		t.Fatalf("Expected limit 2 after 1 failure, got %d", limit)
+	}
+
+	c.RecordFailure("OOM error") // Halves to 1
+	if limit := c.GetLimit(); limit != 1 {
+		t.Fatalf("Expected limit 1 after 2 failures, got %d", limit)
+	}
+
+	c.RecordFailure("OOM error") // Minimum limit remains 1
+	if limit := c.GetLimit(); limit != 1 {
+		t.Fatalf("Expected limit 1 (minimum limit), got %d", limit)
+	}
+
+	// Record fast successes to check increase (requires 5 consecutive fast successes)
+	for i := 0; i < 4; i++ {
+		c.RecordSuccess(100 * time.Millisecond)
+		if limit := c.GetLimit(); limit != 1 {
+			t.Fatalf("Limit should stay 1 until 5 consecutive successes, got %d on success %d", limit, i+1)
+		}
+	}
+
+	c.RecordSuccess(100 * time.Millisecond) // 5th success: increases to 2
+	if limit := c.GetLimit(); limit != 2 {
+		t.Fatalf("Expected limit 2 after 5 successes, got %d", limit)
+	}
+
+	// Success with slow response should decrease
+	c.RecordSuccess(2 * time.Second) // > 1.5s -> halves to 1
+	if limit := c.GetLimit(); limit != 1 {
+		t.Fatalf("Expected limit to scale down to 1 on slow response, got %d", limit)
+	}
+}
+
+func TestFetchRemoteEmbedding_RetryAndThrottle(t *testing.T) {
+	mockClient := &MockQdrantClient{}
+	cfg := Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 4,
+	}
+
+	worker := NewIngestionWorker(cfg, mockClient, nil)
+	defer worker.Close()
+
+	attempts := 0
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts < 3 {
+				// Return 429 for the first two attempts
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader("Too Many Requests")),
+					Header:     make(http.Header),
+				}, nil
+			}
+			// Succeed on the third attempt
+			respBody := `{"embedding": [0.5, 0.6, 0.7]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.httpClient.Transport = mockHTTP
+
+	ctx := context.Background()
+	emb, err := worker.fetchRemoteEmbedding(ctx, "hello test")
+	if err != nil {
+		t.Fatalf("Expected embedding fetch to eventually succeed after retries, got error: %v", err)
+	}
+
+	if len(emb) != 3 {
+		t.Fatalf("Expected embedding length 3, got %d", len(emb))
+	}
+	if attempts != 3 {
+		t.Fatalf("Expected exactly 3 attempts, got %d", attempts)
+	}
+
+	// Verify concurrency limit scaled down due to 429 failures
+	if limit := worker.concurrencyController.GetLimit(); limit != 1 {
+		t.Fatalf("Expected concurrency limit to be scaled down to 1, got %d", limit)
+	}
+}
+
+func TestSyncFileState_IgnoreLogFile(t *testing.T) {
+	mockClient := &MockQdrantClient{}
+	cfg := Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+	}
+
+	worker := NewIngestionWorker(cfg, mockClient, nil)
+	defer worker.Close()
+
+	logPath := filepath.Join(os.TempDir(), ".qdrant-mcp-server.log")
+	worker.syncFileState(context.Background(), logPath)
+
+	mockClient.mu.Lock()
+	upsertCount := len(mockClient.upsertCalls)
+	mockClient.mu.Unlock()
+
+	if upsertCount != 0 {
+		t.Fatalf("Expected log file to be completely ignored and never upserted, got %d upserts", upsertCount)
+	}
+}
+
+
 

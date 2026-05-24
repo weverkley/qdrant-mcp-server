@@ -94,3 +94,26 @@ OLLAMA_HOST = "http://toml-ollama:11434"
 		t.Errorf("Expected http://toml-ollama:11434, got %s", vars["OLLAMA_HOST"])
 	}
 }
+
+func TestConfig_LogToFileParsing(t *testing.T) {
+	os.Setenv("LOG_TO_FILE", "true")
+	defer os.Unsetenv("LOG_TO_FILE")
+
+	cfg := loadConfig()
+	if !cfg.LogToFile {
+		t.Errorf("Expected LogToFile to be true when LOG_TO_FILE env is true")
+	}
+
+	args := []string{"ingest", "--log-to-file", "false"}
+	flags := parseCLIFlags(args)
+	if flags["LOG_TO_FILE"] != "false" {
+		t.Errorf("Expected flags[LOG_TO_FILE] to be false, got %s", flags["LOG_TO_FILE"])
+	}
+
+	args2 := []string{"ingest", "-lf", "true"}
+	flags2 := parseCLIFlags(args2)
+	if flags2["LOG_TO_FILE"] != "true" {
+		t.Errorf("Expected flags2[LOG_TO_FILE] to be true, got %s", flags2["LOG_TO_FILE"])
+	}
+}
+

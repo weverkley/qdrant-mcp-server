@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/qdrant/go-client/qdrant"
@@ -24,6 +23,18 @@ func main() {
 
 	// Setup localized logs redirected away from stdout to keep MCP channel clean
 	log.SetOutput(os.Stderr)
+
+	// Configure physical log file if option enabled
+	cfg := loadConfig()
+	if cfg.LogToFile {
+		logFile, err := os.OpenFile(".qdrant-mcp-server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			log.Printf("Warning: Failed to open log file: %v", err)
+		} else {
+			log.SetOutput(logFile)
+			log.Println("--- Log Session Started ---")
+		}
+	}
 
 	// Intercept command line arguments for skill generation
 	if len(os.Args) > 1 {
@@ -83,7 +94,7 @@ func main() {
 
 	log.Println("Starting Go Qdrant-RAG MCP Server...")
 
-	cfg := loadConfig()
+	cfg = loadConfig()
 	if cfg.CollectionName == "" || cfg.WatchDirectory == "" || cfg.OllamaHost == "" {
 		log.Fatal("Fatal: Missing required environment variables (QDRANT_COLLECTION, WATCH_DIRECTORY, OLLAMA_HOST)")
 	}
@@ -169,83 +180,7 @@ func main() {
 
 func cancelHandle(c context.CancelFunc) { c() }
 
-// --- File Watcher & Ingestion Subsystems ---
-func (iw *IngestionWorker) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, eventChan chan<- string) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
 
-			baseName := filepath.Base(event.Name)
-
-			// Dynamically determine if the event path matches any allowed hidden folder patterns
-			isAllowedHiddenPath := false
-			for _, allowedDir := range iw.cfg.IncludeHiddenDirs {
-				if strings.Contains(event.Name, "/"+allowedDir+"/") {
-					isAllowedHiddenPath = true
-					break
-				}
-			}
-
-			// Guard against general hidden files unless they belong to an explicitly allowed tree
-			if (strings.HasPrefix(baseName, ".") && !isAllowedHiddenPath) ||
-				strings.HasPrefix(baseName, "~") ||
-				strings.HasSuffix(baseName, ".tmp") {
-				continue
-			}
-
-			// Focus explicitly on functional mutation blocks
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) {
-				eventChan <- event.Name
-			}
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("Fsnotify interface raised exception: %v", err)
-		}
-	}
-}
-
-func (iw *IngestionWorker) ingestionConsumer(ctx context.Context, eventChan <-chan string) {
-	timers := make(map[string]*time.Timer)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case path := <-eventChan:
-			// Debounce frequent chunks to avoid thrashing remote CPU/Network resources
-			if timer, exists := timers[path]; exists {
-				timer.Stop()
-			}
-
-			iw.mu.Lock()
-			iw.pendingFiles[path] = time.Now()
-			iw.mu.Unlock()
-
-			timers[path] = time.AfterFunc(iw.cfg.DebounceDuration, func() {
-				iw.mu.Lock()
-				delete(iw.pendingFiles, path)
-				iw.activeSyncs++
-				iw.mu.Unlock()
-
-				defer func() {
-					iw.mu.Lock()
-					iw.activeSyncs--
-					iw.totalSynced++
-					iw.mu.Unlock()
-				}()
-
-				iw.syncFileState(context.Background(), path)
-			})
-		}
-	}
-}
 
 func printCLIHelp() {
 	fmt.Println("\n==================================================================")

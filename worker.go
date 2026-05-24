@@ -46,6 +46,12 @@ type BatchUpserter struct {
 }
 
 func NewBatchUpserter(qdrantClient QdrantClient, collectionName string, batchSize int, timeout time.Duration) *BatchUpserter {
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	if timeout <= 0 {
+		timeout = 200 * time.Millisecond
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &BatchUpserter{
 		qdrantClient:   qdrantClient,
@@ -159,17 +165,121 @@ func (b *BatchUpserter) Close() {
 	<-b.done
 }
 
+// --- Adaptive Concurrency Control ---
+type ConcurrencyController struct {
+	mu            sync.Mutex
+	maxLimit      int
+	currentLimit  int
+	activeCount   int
+	waiters       []chan struct{}
+	successStreak int
+}
+
+func NewConcurrencyController(maxLimit int) *ConcurrencyController {
+	return &ConcurrencyController{
+		maxLimit:     maxLimit,
+		currentLimit: maxLimit,
+	}
+}
+
+func (c *ConcurrencyController) GetLimit() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentLimit
+}
+
+func (c *ConcurrencyController) Acquire(ctx context.Context) error {
+	c.mu.Lock()
+	if c.activeCount < c.currentLimit {
+		c.activeCount++
+		c.mu.Unlock()
+		return nil
+	}
+
+	ch := make(chan struct{})
+	c.waiters = append(c.waiters, ch)
+	c.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		c.mu.Lock()
+		for i, w := range c.waiters {
+			if w == ch {
+				c.waiters = append(c.waiters[:i], c.waiters[i+1:]...)
+				break
+			}
+		}
+		c.mu.Unlock()
+		return ctx.Err()
+	case <-ch:
+		return nil
+	}
+}
+
+func (c *ConcurrencyController) Release() {
+	c.mu.Lock()
+	c.activeCount--
+	c.notifyWaiters()
+	c.mu.Unlock()
+}
+
+func (c *ConcurrencyController) notifyWaiters() {
+	for c.activeCount < c.currentLimit && len(c.waiters) > 0 {
+		waiter := c.waiters[0]
+		c.waiters = c.waiters[1:]
+		c.activeCount++
+		close(waiter)
+	}
+}
+
+func (c *ConcurrencyController) RecordSuccess(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if duration < 1500*time.Millisecond {
+		c.successStreak++
+		if c.successStreak >= 5 {
+			if c.currentLimit < c.maxLimit {
+				c.currentLimit++
+				log.Printf("Ollama embedding responds fast (%v). Scaling concurrency limit up to %d", duration, c.currentLimit)
+			}
+			c.successStreak = 0
+		}
+	} else {
+		c.successStreak = 0
+		c.decreaseLimit(fmt.Sprintf("slow latency (%v)", duration))
+	}
+}
+
+func (c *ConcurrencyController) RecordFailure(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.successStreak = 0
+	c.decreaseLimit(reason)
+}
+
+func (c *ConcurrencyController) decreaseLimit(reason string) {
+	if c.currentLimit > 1 {
+		c.currentLimit = c.currentLimit / 2
+		if c.currentLimit < 1 {
+			c.currentLimit = 1
+		}
+		log.Printf("Halving concurrency limit to %d due to: %s", c.currentLimit, reason)
+		c.notifyWaiters()
+	}
+}
+
 type IngestionWorker struct {
-	cfg              Config
-	qdrantClient     QdrantClient
-	httpClient       *http.Client
-	mu               sync.Mutex
-	pendingFiles     map[string]time.Time
-	activeSyncs      int
-	totalSynced      int
-	sem              chan struct{} // semaphore to rate limit concurrent embedding workers
-	gitignoreMatcher *GitIgnoreMatcher
-	batchUpserter    *BatchUpserter
+	cfg                  Config
+	qdrantClient         QdrantClient
+	httpClient           *http.Client
+	mu                   sync.Mutex
+	pendingFiles         map[string]time.Time
+	activeSyncs          int
+	totalSynced          int
+	sem                  chan struct{} // semaphore to rate limit concurrent embedding workers
+	gitignoreMatcher     *GitIgnoreMatcher
+	batchUpserter        *BatchUpserter
+	concurrencyController *ConcurrencyController
 }
 
 func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
@@ -182,6 +292,7 @@ func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgn
 		gitignoreMatcher: gitIgnore,
 	}
 	iw.batchUpserter = NewBatchUpserter(qdrantClient, cfg.CollectionName, cfg.BatchSize, cfg.BatchTimeout)
+	iw.concurrencyController = NewConcurrencyController(cfg.MaxEmbeddingWorkers)
 	return iw
 }
 
@@ -201,6 +312,9 @@ type OllamaEmbedResp struct {
 }
 
 func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
+	if strings.Contains(path, ".qdrant-mcp-server.log") {
+		return
+	}
 	if iw.gitignoreMatcher != nil && iw.gitignoreMatcher.IsIgnored(path, false) {
 		return
 	}
@@ -465,6 +579,9 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 	// 2. Discover files
 	var filesToIngest []string
 	err = filepath.WalkDir(iw.cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
+		if strings.Contains(path, ".qdrant-mcp-server.log") {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -528,21 +645,88 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 }
 
 func (iw *IngestionWorker) fetchRemoteEmbedding(ctx context.Context, text string) ([]float32, error) {
-	payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.cfg.EmbeddingModel, Prompt: text})
-	req, _ := http.NewRequestWithContext(ctx, "POST", iw.cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
-	req.Header.Set("Content-Type", "application/json")
+	var lastErr error
+	backoff := 100 * time.Millisecond
 
-	resp, err := iw.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := iw.concurrencyController.Acquire(ctx); err != nil {
+			return nil, err
+		}
 
-	var out OllamaEmbedResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		startTime := time.Now()
+		payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.cfg.EmbeddingModel, Prompt: text})
+		req, _ := http.NewRequestWithContext(ctx, "POST", iw.cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := iw.httpClient.Do(req)
+		duration := time.Since(startTime)
+
+		if err != nil {
+			iw.concurrencyController.RecordFailure("HTTP client error: " + err.Error())
+			iw.concurrencyController.Release()
+			lastErr = err
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
+		}
+
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			iw.concurrencyController.RecordFailure(fmt.Sprintf("Ollama overloaded: HTTP %d", resp.StatusCode))
+			iw.concurrencyController.Release()
+			lastErr = fmt.Errorf("ollama overloaded: HTTP %d", resp.StatusCode)
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			iw.concurrencyController.RecordFailure(fmt.Sprintf("HTTP error status: %d", resp.StatusCode))
+			iw.concurrencyController.Release()
+			lastErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
+		}
+
+		var out OllamaEmbedResp
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			iw.concurrencyController.RecordFailure("JSON decode error")
+			iw.concurrencyController.Release()
+			lastErr = err
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
+		}
+
+		// Success!
+		iw.concurrencyController.RecordSuccess(duration)
+		iw.concurrencyController.Release()
+		return out.Embedding, nil
 	}
-	return out.Embedding, nil
+
+	return nil, fmt.Errorf("failed to fetch embedding after 3 attempts: %w", lastErr)
 }
 
 func (iw *IngestionWorker) chunkText(text string, size int) []string {
