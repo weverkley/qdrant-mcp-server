@@ -32,7 +32,7 @@ This document outlines the planned improvements, architectural enhancements, and
     * `file_extensions` (e.g., limit queries to `.go` or `.cs`).
     * `path_prefix` (e.g., search strictly inside a `src/auth/` directory).
   - Use Qdrant's high-speed payload keyword matching filters.
-- [ ] **Hybrid Search (Dense + Sparse)**
+- [x] **Hybrid Search (Dense + Sparse)**
   - Combine semantic dense vector search (Ollama embeddings) with sparse vector representations (like BM25).
   - Yield perfect search results for both high-level concepts and exact keyword matches (like specific variables, function names, or exact error codes).
 

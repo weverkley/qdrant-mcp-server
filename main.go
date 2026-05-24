@@ -210,6 +210,8 @@ func printCLIHelp() {
 	fmt.Println("  --max-workers, -mw <num>       Maximum concurrent embedding threads")
 	fmt.Println("  --batch-size, -bs <num>        Batch size for vector upserts (default: 100)")
 	fmt.Println("  --batch-timeout, -bt <dur>     Batch timeout for vector upserts (default: 200ms)")
+	fmt.Println("  --log-to-file, -lf <bool>      Log output to physical file option (default: false)")
+	fmt.Println("  --search-mode, -sm <mode>      Search mode: 'dense', 'sparse', or 'hybrid' (default: 'dense')")
 	fmt.Println()
 	fmt.Println("\x1b[1;33mAuto-Discovery Feature:\x1b[0m")
 	fmt.Println("  The server automatically searches upwards from the current directory for")
@@ -228,5 +230,7 @@ func printCLIHelp() {
 	fmt.Println("  MAX_EMBEDDING_WORKERS  Max concurrent embedding worker threads (default: 5)")
 	fmt.Println("  BATCH_SIZE          Batch size for vector upserts (default: 100)")
 	fmt.Println("  BATCH_TIMEOUT       Batch timeout for vector upserts (default: 200ms)")
+	fmt.Println("  LOG_TO_FILE         Log output to physical file option (default: false)")
+	fmt.Println("  SEARCH_MODE         Search mode: dense, sparse, or hybrid (default: dense)")
 	fmt.Println("================================================================================")
 }

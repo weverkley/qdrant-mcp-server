@@ -27,6 +27,7 @@ type Config struct {
 	BatchSize         int           // batch size for vector upserts (default: 100)
 	BatchTimeout      time.Duration // batch timeout for vector upserts (default: 200ms)
 	LogToFile         bool          // log output to physical file option (default: false)
+	SearchMode        string        // search mode: "dense", "sparse", or "hybrid" (default: "dense")
 }
 
 
@@ -102,6 +103,15 @@ func loadConfig() Config {
 		}
 	}
 
+	searchMode := "dense"
+	if searchModeStr := strings.ToLower(strings.TrimSpace(os.Getenv("SEARCH_MODE"))); searchModeStr != "" {
+		if searchModeStr == "dense" || searchModeStr == "sparse" || searchModeStr == "hybrid" {
+			searchMode = searchModeStr
+		} else {
+			log.Printf("Warning: SEARCH_MODE '%s' is not valid (must be dense, sparse, or hybrid), falling back to default 'dense'", searchModeStr)
+		}
+	}
+
 	return Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
@@ -117,6 +127,7 @@ func loadConfig() Config {
 		BatchSize:           batchSize,
 		BatchTimeout:        batchTimeout,
 		LogToFile:           logToFile,
+		SearchMode:          searchMode,
 	}
 }
 
@@ -215,6 +226,8 @@ func parseCLIFlags(args []string) map[string]string {
 		"-bt":                  "BATCH_TIMEOUT",
 		"--log-to-file":        "LOG_TO_FILE",
 		"-lf":                  "LOG_TO_FILE",
+		"--search-mode":        "SEARCH_MODE",
+		"-sm":                  "SEARCH_MODE",
 	}
 
 	for i := 0; i < len(args); i++ {

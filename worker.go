@@ -7,10 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -452,9 +456,14 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["receiver"] = fn.Receiver
 			}
 
+			sIndices, sValues := ComputeSparseVector(fn.Signature)
+
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
-				Vectors: qdrant.NewVectors(vector...),
+				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+					"":       qdrant.NewVector(vector...),
+					"sparse": qdrant.NewVectorSparse(sIndices, sValues),
+				}),
 				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
@@ -486,9 +495,14 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				payload["page_number"] = int64(chunk.PageNumber)
 			}
 
+			sIndices, sValues := ComputeSparseVector(chunk.Content)
+
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
-				Vectors: qdrant.NewVectors(vector...),
+				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+					"":       qdrant.NewVector(vector...),
+					"sparse": qdrant.NewVectorSparse(sIndices, sValues),
+				}),
 				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
@@ -518,9 +532,14 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"updated":       time.Now().Unix(),
 			}
 
+			sIndices, sValues := ComputeSparseVector(chunk)
+
 			points = append(points, &qdrant.PointStruct{
 				Id:      qdrant.NewIDUUID(id.String()),
-				Vectors: qdrant.NewVectors(vector...),
+				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+					"":       qdrant.NewVector(vector...),
+					"sparse": qdrant.NewVectorSparse(sIndices, sValues),
+				}),
 				Payload: qdrant.NewValueMap(sanitizePayload(payload)),
 			})
 		}
@@ -568,6 +587,9 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
 				Size:     dimension,
 				Distance: qdrant.Distance_Cosine,
+			}),
+			SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
+				"sparse": {},
 			}),
 		})
 		if err != nil {
@@ -789,15 +811,58 @@ func (iw *IngestionWorker) executeVectorSearch(ctx context.Context, query string
 
 	// Step B: Direct a high-speed gRPC Query request to your Qdrant collection
 	// Retrieve top 5 closest matching context code sheets
-	queryResponse, err := iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
-		CollectionName: iw.cfg.CollectionName,
-		Query:          qdrant.NewQueryDense(vector),
-		Limit:          qdrant.PtrOf(uint64(5)),
-		Filter:         qdrantFilter,
-		WithPayload:    qdrant.NewWithPayloadEnable(true), // Ensure code text comes back
-	})
-	if err != nil {
-		return "", fmt.Errorf("qdrant search operation failed: %w", err)
+	var queryResponse []*qdrant.ScoredPoint
+	var queryResponseErr error
+
+	searchMode := strings.ToLower(strings.TrimSpace(iw.cfg.SearchMode))
+	if searchMode == "" {
+		searchMode = "dense"
+	}
+
+	switch searchMode {
+	case "sparse":
+		sIndices, sValues := ComputeSparseVector(query)
+		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.cfg.CollectionName,
+			Query:          qdrant.NewQuerySparse(sIndices, sValues),
+			Limit:          qdrant.PtrOf(uint64(5)),
+			Filter:         qdrantFilter,
+			WithPayload:    qdrant.NewWithPayloadEnable(true),
+			Using:          qdrant.PtrOf("sparse"),
+		})
+	case "hybrid":
+		sIndices, sValues := ComputeSparseVector(query)
+		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.cfg.CollectionName,
+			Prefetch: []*qdrant.PrefetchQuery{
+				{
+					Query:  qdrant.NewQueryDense(vector),
+					Limit:  qdrant.PtrOf(uint64(20)),
+					Filter: qdrantFilter,
+				},
+				{
+					Query:  qdrant.NewQuerySparse(sIndices, sValues),
+					Using:  qdrant.PtrOf("sparse"),
+					Limit:  qdrant.PtrOf(uint64(20)),
+					Filter: qdrantFilter,
+				},
+			},
+			Query:       qdrant.NewQueryFusion(qdrant.Fusion_RRF),
+			Limit:       qdrant.PtrOf(uint64(5)),
+			WithPayload: qdrant.NewWithPayloadEnable(true),
+		})
+	default: // "dense" or fallback
+		queryResponse, queryResponseErr = iw.qdrantClient.Query(ctx, &qdrant.QueryPoints{
+			CollectionName: iw.cfg.CollectionName,
+			Query:          qdrant.NewQueryDense(vector),
+			Limit:          qdrant.PtrOf(uint64(5)),
+			Filter:         qdrantFilter,
+			WithPayload:    qdrant.NewWithPayloadEnable(true),
+		})
+	}
+
+	if queryResponseErr != nil {
+		return "", fmt.Errorf("qdrant search operation failed: %w", queryResponseErr)
 	}
 
 	if len(queryResponse) == 0 {
@@ -956,4 +1021,78 @@ func sanitizePayload(payload map[string]interface{}) map[string]interface{} {
 		}
 	}
 	return payload
+}
+
+var tokenRegex = regexp.MustCompile(`[a-zA-Z0-9_]+`)
+
+var stopWords = map[string]struct{}{
+	"a": {}, "about": {}, "above": {}, "after": {}, "again": {}, "against": {}, "all": {}, "am": {}, "an": {}, "and": {}, "any": {}, "are": {}, "arent": {}, "as": {}, "at": {},
+	"be": {}, "because": {}, "been": {}, "before": {}, "being": {}, "below": {}, "between": {}, "both": {}, "but": {}, "by": {},
+	"cant": {}, "cannot": {}, "could": {}, "couldnt": {},
+	"did": {}, "didnt": {}, "do": {}, "does": {}, "doesnt": {}, "doing": {}, "dont": {}, "down": {}, "during": {},
+	"each": {},
+	"few": {}, "for": {}, "from": {}, "further": {},
+	"had": {}, "hadnt": {}, "has": {}, "hasnt": {}, "have": {}, "havent": {}, "having": {}, "he": {}, "hed": {}, "hell": {}, "hes": {}, "her": {}, "here": {}, "heres": {}, "hers": {}, "herself": {}, "him": {}, "himself": {}, "his": {}, "how": {}, "hows": {},
+	"i": {}, "id": {}, "ill": {}, "im": {}, "ive": {}, "if": {}, "in": {}, "into": {}, "is": {}, "isnt": {}, "it": {}, "its": {}, "itself": {},
+	"lets": {},
+	"me": {}, "more": {}, "most": {}, "mustnt": {}, "my": {}, "myself": {},
+	"no": {}, "nor": {}, "not": {},
+	"of": {}, "off": {}, "on": {}, "once": {}, "only": {}, "or": {}, "other": {}, "ought": {}, "our": {}, "ours": {}, "ourselves": {}, "out": {}, "over": {}, "own": {},
+	"same": {}, "shant": {}, "she": {}, "shed": {}, "shell": {}, "shes": {}, "should": {}, "shouldnt": {}, "so": {}, "some": {}, "such": {},
+	"than": {}, "that": {}, "thats": {}, "the": {}, "their": {}, "theirs": {}, "them": {}, "themselves": {}, "then": {}, "there": {}, "theres": {}, "these": {}, "they": {}, "theyd": {}, "theyll": {}, "theyre": {}, "theyve": {}, "this": {}, "those": {}, "through": {}, "to": {}, "too": {}, "under": {}, "until": {}, "up": {}, "very": {},
+	"was": {}, "wasnt": {}, "we": {}, "wed": {}, "well": {}, "were": {}, "weve": {}, "werent": {}, "what": {}, "whats": {}, "when": {}, "whens": {}, "where": {}, "wheres": {}, "which": {}, "while": {}, "who": {}, "whos": {}, "whom": {}, "why": {}, "whys": {}, "with": {}, "wont": {}, "would": {}, "wouldnt": {},
+	"you": {}, "youd": {}, "youll": {}, "youre": {}, "youve": {}, "your": {}, "yours": {}, "yourself": {}, "yourselves": {},
+}
+
+func ComputeSparseVector(text string) ([]uint32, []float32) {
+	text = strings.ToLower(text)
+	matches := tokenRegex.FindAllString(text, -1)
+
+	tfMap := make(map[string]int)
+	for _, match := range matches {
+		if _, isStop := stopWords[match]; isStop {
+			continue
+		}
+		if len(match) == 0 {
+			continue
+		}
+		tfMap[match]++
+	}
+
+	if len(tfMap) == 0 {
+		return []uint32{}, []float32{}
+	}
+
+	type hashWeight struct {
+		index  uint32
+		weight float32
+	}
+
+	hwMap := make(map[uint32]float32)
+	for token, tf := range tfMap {
+		h := fnv.New32a()
+		h.Write([]byte(token))
+		idx := h.Sum32()
+
+		weight := float32(tf) * float32(math.Log(1+float64(len(token))))
+		hwMap[idx] += weight
+	}
+
+	list := make([]hashWeight, 0, len(hwMap))
+	for idx, val := range hwMap {
+		list = append(list, hashWeight{index: idx, weight: val})
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].index < list[j].index
+	})
+
+	indices := make([]uint32, len(list))
+	values := make([]float32, len(list))
+	for i, item := range list {
+		indices[i] = item.index
+		values[i] = item.weight
+	}
+
+	return indices, values
 }

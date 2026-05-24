@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ type MockQdrantClient struct {
 	scrollResp  []*qdrant.RetrievedPoint
 	scrollErr   error
 	deleteCalls []string
+	queryCalls  []*qdrant.QueryPoints
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -48,6 +50,9 @@ func (m *MockQdrantClient) CreateCollection(ctx context.Context, in *qdrant.Crea
 }
 
 func (m *MockQdrantClient) Query(ctx context.Context, in *qdrant.QueryPoints) ([]*qdrant.ScoredPoint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queryCalls = append(m.queryCalls, in)
 	return nil, nil
 }
 
@@ -475,6 +480,169 @@ func TestSyncFileState_IgnoreLogFile(t *testing.T) {
 
 	if upsertCount != 0 {
 		t.Fatalf("Expected log file to be completely ignored and never upserted, got %d upserts", upsertCount)
+	}
+}
+
+func TestComputeSparseVector(t *testing.T) {
+	text := "Hello world! This is a test_vector symbol. Hello code."
+	indices, values := ComputeSparseVector(text)
+
+	// "hello", "world", "test_vector", "symbol", "code" are valid tokens.
+	// "this", "is", "a" are stop words.
+	// Let's verify that the length of indices and values are the same
+	if len(indices) != len(values) {
+		t.Fatalf("Expected indices and values lengths to be equal, got %d and %d", len(indices), len(values))
+	}
+
+	// We expect 5 unique tokens
+	if len(indices) != 5 {
+		t.Fatalf("Expected 5 unique tokens, got %d", len(indices))
+	}
+
+	// Verify indices are sorted in ascending order
+	for i := 1; i < len(indices); i++ {
+		if indices[i] <= indices[i-1] {
+			t.Errorf("Expected indices to be sorted, but index %d is not greater than %d", indices[i], indices[i-1])
+		}
+	}
+
+	// Verify that "test_vector" has a higher weight than "code" because:
+	// "test_vector" has tf=1, length=11 -> weight = 1 * log(1 + 11) = log(12)
+	// "code" has tf=1, length=4 -> weight = 1 * log(1 + 4) = log(5)
+	// Let's find their indexes and compare values
+	var testVectorWeight, codeWeight float32
+	h := fnv.New32a()
+	h.Write([]byte("test_vector"))
+	testVectorIdx := h.Sum32()
+
+	h2 := fnv.New32a()
+	h2.Write([]byte("code"))
+	codeIdx := h2.Sum32()
+
+	for i, idx := range indices {
+		if idx == testVectorIdx {
+			testVectorWeight = values[i]
+		}
+		if idx == codeIdx {
+			codeWeight = values[i]
+		}
+	}
+
+	if testVectorWeight == 0 {
+		t.Errorf("Expected to find weight for 'test_vector'")
+	}
+	if codeWeight == 0 {
+		t.Errorf("Expected to find weight for 'code'")
+	}
+	if testVectorWeight <= codeWeight {
+		t.Errorf("Expected weight of 'test_vector' (%f) to be greater than 'code' (%f)", testVectorWeight, codeWeight)
+	}
+}
+
+func TestExecuteVectorSearch_SearchModes(t *testing.T) {
+	mockClient := &MockQdrantClient{}
+	cfg := Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		SearchMode:          "dense",
+	}
+
+	worker := NewIngestionWorker(cfg, mockClient, nil)
+	defer worker.Close()
+
+	// Mock Ollama host HTTP response for fetching query embedding
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			respBody := `{"embedding": [0.1, 0.2, 0.3]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.httpClient.Transport = mockHTTP
+
+	ctx := context.Background()
+
+	// Test 1: Dense Search Mode
+	worker.cfg.SearchMode = "dense"
+	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+
+	mockClient.mu.Lock()
+	if len(mockClient.queryCalls) != 1 {
+		mockClient.mu.Unlock()
+		t.Fatalf("Expected 1 query call, got %d", len(mockClient.queryCalls))
+	}
+	denseCall := mockClient.queryCalls[0]
+	mockClient.queryCalls = nil // reset
+	mockClient.mu.Unlock()
+
+	if denseCall.Query == nil || denseCall.Query.GetNearest() == nil || denseCall.Query.GetNearest().GetDense() == nil {
+		t.Errorf("Expected dense query to be set")
+	}
+	if len(denseCall.Prefetch) != 0 {
+		t.Errorf("Expected no prefetch queries for dense mode")
+	}
+
+	// Test 2: Sparse Search Mode
+	worker.cfg.SearchMode = "sparse"
+	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+
+	mockClient.mu.Lock()
+	if len(mockClient.queryCalls) != 1 {
+		mockClient.mu.Unlock()
+		t.Fatalf("Expected 1 query call for sparse, got %d", len(mockClient.queryCalls))
+	}
+	sparseCall := mockClient.queryCalls[0]
+	mockClient.queryCalls = nil // reset
+	mockClient.mu.Unlock()
+
+	if sparseCall.Query == nil || sparseCall.Query.GetNearest() == nil || sparseCall.Query.GetNearest().GetSparse() == nil {
+		t.Errorf("Expected sparse query to be set")
+	}
+	if sparseCall.Using == nil || *sparseCall.Using != "sparse" {
+		t.Errorf("Expected using to be 'sparse', got %v", sparseCall.Using)
+	}
+
+	// Test 3: Hybrid Search Mode
+	worker.cfg.SearchMode = "hybrid"
+	_, _ = worker.executeVectorSearch(ctx, "test query", nil, "")
+
+	mockClient.mu.Lock()
+	if len(mockClient.queryCalls) != 1 {
+		mockClient.mu.Unlock()
+		t.Fatalf("Expected 1 query call for hybrid, got %d", len(mockClient.queryCalls))
+	}
+	hybridCall := mockClient.queryCalls[0]
+	mockClient.queryCalls = nil // reset
+	mockClient.mu.Unlock()
+
+	if hybridCall.Query == nil || hybridCall.Query.GetFusion() != qdrant.Fusion_RRF {
+		t.Errorf("Expected fusion query (RRF) to be set, got %v", hybridCall.Query)
+	}
+	if len(hybridCall.Prefetch) != 2 {
+		t.Fatalf("Expected 2 prefetch queries in hybrid mode, got %d", len(hybridCall.Prefetch))
+	}
+
+	densePrefetch := hybridCall.Prefetch[0]
+	sparsePrefetch := hybridCall.Prefetch[1]
+
+	if densePrefetch.Query == nil || densePrefetch.Query.GetNearest() == nil || densePrefetch.Query.GetNearest().GetDense() == nil {
+		t.Errorf("Expected dense prefetch query to be set")
+	}
+	if densePrefetch.Using != nil && *densePrefetch.Using != "" {
+		t.Errorf("Expected dense prefetch to have empty/nil Using, got %v", densePrefetch.Using)
+	}
+
+	if sparsePrefetch.Query == nil || sparsePrefetch.Query.GetNearest() == nil || sparsePrefetch.Query.GetNearest().GetSparse() == nil {
+		t.Errorf("Expected sparse prefetch query to be set")
+	}
+	if sparsePrefetch.Using == nil || *sparsePrefetch.Using != "sparse" {
+		t.Errorf("Expected sparse prefetch Using to be 'sparse', got %v", sparsePrefetch.Using)
 	}
 }
 

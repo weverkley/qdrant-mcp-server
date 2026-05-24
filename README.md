@@ -79,6 +79,7 @@ The server relies on the following environment variables for its configuration:
 | `BATCH_SIZE` | Batch size for vector upserts. | `100` | No |
 | `BATCH_TIMEOUT` | Batch timeout for vector upserts (e.g. `200ms`, `1s`). | `200ms` | No |
 | `LOG_TO_FILE` | Enable logging to `.qdrant-mcp-server.log` physical file. | `false` | No |
+| `SEARCH_MODE` | Vector search mode: `dense` (pure semantic), `sparse` (precise keyword), or `hybrid` (dense + sparse combined using Reciprocal Rank Fusion RRF). | `dense` | No |
 
 ---
 
@@ -162,9 +163,10 @@ qdrant-mcp-server ingest -c my-collection -w ./ -o http://172.20.0.5:11434 -e no
 - `--include-hidden-dirs`, `-ihd <list>`: Comma-separated hidden directories to watch (`INCLUDE_HIDDEN_DIRS`)
 - `--parser-mode`, `-pm <mode>`: Parsing mode: `code`, `doc`, or `full` (`PARSER_MODE`)
 - `--max-workers`, `-mw <number>`: Max concurrent embedding workers (`MAX_EMBEDDING_WORKERS`)
-- `--batch-size`, `-bs <number>`: Batch size for vector upserts (`BATCH_SIZE`, default: 100)
-- `--batch-timeout`, `-bt <duration>`: Batch timeout for vector upserts (`BATCH_TIMEOUT`, default: 200ms)
-- `--log-to-file`, `-lf <bool>`: Enable log output to physical file (`LOG_TO_FILE`, default: false)
+- --batch-size, -bs <number>: Batch size for vector upserts (`BATCH_SIZE`, default: 100)
+- --batch-timeout, -bt <duration>: Batch timeout for vector upserts (`BATCH_TIMEOUT`, default: 200ms)
+- --log-to-file, -lf <bool>: Enable log output to physical file (`LOG_TO_FILE`, default: false)
+- --search-mode, -sm <mode>: Vector search mode: `dense`, `sparse`, or `hybrid` (`SEARCH_MODE`, default: dense)
 
 ---
 

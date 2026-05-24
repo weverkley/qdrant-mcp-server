@@ -117,3 +117,25 @@ func TestConfig_LogToFileParsing(t *testing.T) {
 	}
 }
 
+func TestConfig_SearchModeParsing(t *testing.T) {
+	os.Setenv("SEARCH_MODE", "hybrid")
+	defer os.Unsetenv("SEARCH_MODE")
+
+	cfg := loadConfig()
+	if cfg.SearchMode != "hybrid" {
+		t.Errorf("Expected SearchMode to be hybrid, got %s", cfg.SearchMode)
+	}
+
+	args := []string{"ingest", "--search-mode", "sparse"}
+	flags := parseCLIFlags(args)
+	if flags["SEARCH_MODE"] != "sparse" {
+		t.Errorf("Expected flags[SEARCH_MODE] to be sparse, got %s", flags["SEARCH_MODE"])
+	}
+
+	args2 := []string{"ingest", "-sm", "dense"}
+	flags2 := parseCLIFlags(args2)
+	if flags2["SEARCH_MODE"] != "dense" {
+		t.Errorf("Expected flags2[SEARCH_MODE] to be dense, got %s", flags2["SEARCH_MODE"])
+	}
+}
+
