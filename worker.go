@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -28,6 +29,7 @@ type QdrantClient interface {
 	CollectionExists(ctx context.Context, collectionName string) (bool, error)
 	CreateCollection(ctx context.Context, in *qdrant.CreateCollection) error
 	Query(ctx context.Context, in *qdrant.QueryPoints) ([]*qdrant.ScoredPoint, error)
+	Scroll(ctx context.Context, in *qdrant.ScrollPoints) ([]*qdrant.RetrievedPoint, error)
 }
 
 type BatchUpserter struct {
@@ -235,12 +237,34 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 		return
 	}
 
-	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
-	_ = iw.purgeFileVectors(ctx, path)
-
 	if len(content) == 0 {
 		return
 	}
+
+	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
+
+	// Scroll Qdrant to check if the file hash matches
+	scrollResult, err := iw.qdrantClient.Scroll(ctx, &qdrant.ScrollPoints{
+		CollectionName: iw.cfg.CollectionName,
+		Filter: &qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewMatchKeyword("file_path", path),
+			},
+		},
+		Limit:       qdrant.PtrOf(uint32(1)),
+		WithPayload: qdrant.NewWithPayloadEnable(true),
+	})
+	if err == nil && len(scrollResult) > 0 {
+		if storedHashVal, exists := scrollResult[0].Payload["file_hash"]; exists {
+			if storedHashVal.GetStringValue() == localHash {
+				log.Printf("File content hash matches for %s, skipping re-indexing.", path)
+				return
+			}
+		}
+	}
+
+	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
+	_ = iw.purgeFileVectors(ctx, path)
 
 	ext := strings.ToLower(filepath.Ext(path))
 	extClean := strings.TrimPrefix(ext, ".")
@@ -307,6 +331,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"extension":     extClean,
 				"relative_path": relPath,
 				"relative_dirs": relDirs,
+				"file_hash":     localHash,
 				"updated":       time.Now().Unix(),
 			}
 			if fn.Receiver != "" {
@@ -340,6 +365,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"extension":     extClean,
 				"relative_path": relPath,
 				"relative_dirs": relDirs,
+				"file_hash":     localHash,
 				"updated":       time.Now().Unix(),
 			}
 			if chunk.PageNumber > 0 {
@@ -374,6 +400,7 @@ func (iw *IngestionWorker) syncFileState(ctx context.Context, path string) {
 				"extension":     extClean,
 				"relative_path": relPath,
 				"relative_dirs": relDirs,
+				"file_hash":     localHash,
 				"updated":       time.Now().Unix(),
 			}
 

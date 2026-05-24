@@ -2,6 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +19,9 @@ type MockQdrantClient struct {
 	mu          sync.Mutex
 	upsertCalls [][]*qdrant.PointStruct
 	upsertErr   error
+	scrollResp  []*qdrant.RetrievedPoint
+	scrollErr   error
+	deleteCalls []string
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -23,7 +32,10 @@ func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) 
 }
 
 func (m *MockQdrantClient) Delete(ctx context.Context, in *qdrant.DeletePoints) (*qdrant.UpdateResult, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteCalls = append(m.deleteCalls, in.CollectionName)
+	return &qdrant.UpdateResult{}, nil
 }
 
 func (m *MockQdrantClient) CollectionExists(ctx context.Context, collectionName string) (bool, error) {
@@ -36,6 +48,12 @@ func (m *MockQdrantClient) CreateCollection(ctx context.Context, in *qdrant.Crea
 
 func (m *MockQdrantClient) Query(ctx context.Context, in *qdrant.QueryPoints) ([]*qdrant.ScoredPoint, error) {
 	return nil, nil
+}
+
+func (m *MockQdrantClient) Scroll(ctx context.Context, in *qdrant.ScrollPoints) ([]*qdrant.RetrievedPoint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.scrollResp, m.scrollErr
 }
 
 func TestBatchUpserter_BatchSizeTrigger(t *testing.T) {
@@ -207,3 +225,131 @@ func TestBatchUpserter_Close(t *testing.T) {
 		t.Fatalf("Expected batch size of 3, got %d", firstBatchSize)
 	}
 }
+
+type MockRoundTripper struct {
+	RoundTripFunc func(req *http.Request) (*http.Response, error)
+}
+
+func (m *MockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return m.RoundTripFunc(req)
+}
+
+func TestSyncFileState_ContentHashing(t *testing.T) {
+	// Create temporary test file
+	tmpFile, err := os.CreateTemp("", "test_hash_*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	content := []byte("hello world")
+	if _, err := tmpFile.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	// Set up mock client
+	mockClient := &MockQdrantClient{}
+
+	cfg := Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		BatchSize:           1,
+		BatchTimeout:        1 * time.Second,
+	}
+
+	worker := NewIngestionWorker(cfg, mockClient, nil)
+	defer worker.Close()
+
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			respBody := `{"embedding": [0.1, 0.2, 0.3]}`
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.httpClient.Transport = mockHTTP
+
+	// --- 1. First Ingestion (Empty Qdrant, should ingest) ---
+	mockClient.scrollResp = nil
+	worker.syncFileState(context.Background(), tmpFile.Name())
+	worker.batchUpserter.Flush()
+
+	mockClient.mu.Lock()
+	initialUpsertCount := len(mockClient.upsertCalls)
+	initialDeleteCount := len(mockClient.deleteCalls)
+	mockClient.mu.Unlock()
+
+	if initialUpsertCount != 1 {
+		t.Fatalf("Expected exactly 1 upsert call on first ingestion, got %d", initialUpsertCount)
+	}
+	if initialDeleteCount != 1 {
+		t.Fatalf("Expected exactly 1 delete call to purge old vectors, got %d", initialDeleteCount)
+	}
+
+	// --- 2. Second Ingestion with matching hash (should skip) ---
+	mockClient.mu.Lock()
+	mockClient.upsertCalls = nil
+	mockClient.deleteCalls = nil
+	mockClient.mu.Unlock()
+
+	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
+	mockClient.scrollResp = []*qdrant.RetrievedPoint{
+		{
+			Payload: map[string]*qdrant.Value{
+				"file_hash": qdrant.NewValueString(localHash),
+			},
+		},
+	}
+
+	worker.syncFileState(context.Background(), tmpFile.Name())
+	worker.batchUpserter.Flush()
+
+	mockClient.mu.Lock()
+	skipUpsertCount := len(mockClient.upsertCalls)
+	skipDeleteCount := len(mockClient.deleteCalls)
+	mockClient.mu.Unlock()
+
+	if skipUpsertCount != 0 {
+		t.Fatalf("Expected 0 upsert calls when hash matches, got %d", skipUpsertCount)
+	}
+	if skipDeleteCount != 0 {
+		t.Fatalf("Expected 0 delete calls when hash matches, got %d", skipDeleteCount)
+	}
+
+	// --- 3. Third Ingestion with differing hash (should re-ingest) ---
+	mockClient.mu.Lock()
+	mockClient.upsertCalls = nil
+	mockClient.deleteCalls = nil
+	mockClient.mu.Unlock()
+
+	mockClient.scrollResp = []*qdrant.RetrievedPoint{
+		{
+			Payload: map[string]*qdrant.Value{
+				"file_hash": qdrant.NewValueString("some-stale-hash"),
+			},
+		},
+	}
+
+	worker.syncFileState(context.Background(), tmpFile.Name())
+	worker.batchUpserter.Flush()
+
+	mockClient.mu.Lock()
+	staleUpsertCount := len(mockClient.upsertCalls)
+	staleDeleteCount := len(mockClient.deleteCalls)
+	mockClient.mu.Unlock()
+
+	if staleUpsertCount != 1 {
+		t.Fatalf("Expected 1 upsert call when hash does not match, got %d", staleUpsertCount)
+	}
+	if staleDeleteCount != 1 {
+		t.Fatalf("Expected 1 delete call when hash does not match, got %d", staleDeleteCount)
+	}
+}
+
