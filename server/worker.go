@@ -101,10 +101,12 @@ func (b *BatchUpserter) start() {
 				return
 			}
 
-			_, err := b.qdrantClient.Upsert(context.Background(), &qdrant.UpsertPoints{
+			upsertCtx, upsertCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, err := b.qdrantClient.Upsert(upsertCtx, &qdrant.UpsertPoints{
 				CollectionName: b.collectionName,
 				Points:         batch,
 			})
+			upsertCancel()
 			if err != nil {
 				log.Printf("gRPC Batch Upsert onto collection '%s' failed: %v", b.collectionName, err)
 			} else {
@@ -158,7 +160,7 @@ func (b *BatchUpserter) Flush() {
 	select {
 	case b.flushCh <- reply:
 		<-reply
-	case <-b.ctx.Done():
+	case <-b.done:
 		return
 	}
 	b.wg.Wait()
@@ -733,17 +735,48 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("error walking watch directory: %w", err)
 	}
 
-	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), iw.Cfg.MaxEmbeddingWorkers)
-	var wg sync.WaitGroup
-	for i, path := range filesToIngest {
+	workerCount := iw.Cfg.MaxEmbeddingWorkers
+	if workerCount <= 0 {
+		workerCount = 5
+	}
+	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), workerCount)
+
+	type job struct {
+		idx  int
+		path string
+	}
+	jobs := make(chan job, len(filesToIngest))
+	for i, p := range filesToIngest {
+		jobs <- job{i, p}
+	}
+	close(jobs)
+
+	var (
+		wg     sync.WaitGroup
+		syncMu sync.Mutex
+		synced int
+	)
+	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
-		go func(idx int, p string) {
+		go func() {
 			defer wg.Done()
-			log.Printf("[%d/%d] Ingesting %s...", idx+1, len(filesToIngest), p)
-			iw.SyncFileState(ctx, p)
-		}(i, path)
+			for j := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[%d/%d] Ingesting %s...", j.idx+1, len(filesToIngest), j.path)
+				iw.SyncFileState(ctx, j.path)
+				syncMu.Lock()
+				synced++
+				syncMu.Unlock()
+			}
+		}()
 	}
 	wg.Wait()
+
+	iw.Mu.Lock()
+	iw.TotalSynced += synced
+	iw.Mu.Unlock()
 
 	log.Println("Flushing remaining vector batches to Qdrant...")
 	iw.BatchUpserter.Flush()
@@ -1176,9 +1209,10 @@ func ComputeSparseVector(text string, customStopWords map[string]struct{}) ([]ui
 
 	hwMap := make(map[uint32]float32)
 	for token, tf := range tfMap {
-		h := fnv.New32a()
+		h := fnv.New64a()
 		h.Write([]byte(token))
-		idx := h.Sum32()
+		v := h.Sum64()
+		idx := uint32(v ^ (v >> 32))
 
 		weight := float32(tf) * float32(math.Log(1+float64(len(token))))
 		hwMap[idx] += weight

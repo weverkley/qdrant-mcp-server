@@ -524,13 +524,15 @@ func TestComputeSparseVector(t *testing.T) {
 	// "code" has tf=1, length=4 -> weight = 1 * log(1 + 4) = log(5)
 	// Let's find their indexes and compare values
 	var testVectorWeight, codeWeight float32
-	h := fnv.New32a()
+	h := fnv.New64a()
 	h.Write([]byte("test_vector"))
-	testVectorIdx := h.Sum32()
+	v := h.Sum64()
+	testVectorIdx := uint32(v ^ (v >> 32))
 
-	h2 := fnv.New32a()
+	h2 := fnv.New64a()
 	h2.Write([]byte("code"))
-	codeIdx := h2.Sum32()
+	v2 := h2.Sum64()
+	codeIdx := uint32(v2 ^ (v2 >> 32))
 
 	for i, idx := range indices {
 		if idx == testVectorIdx {

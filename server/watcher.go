@@ -70,7 +70,7 @@ func (iw *IngestionWorker) IngestionConsumer(ctx context.Context, eventChan <-ch
 					iw.Mu.Unlock()
 				}()
 
-				iw.SyncFileState(context.Background(), path)
+				iw.SyncFileState(ctx, path)
 			})
 		}
 	}
