@@ -719,6 +719,12 @@ func TestShouldIgnoreFile(t *testing.T) {
 		{"/src/SomeFolder/app.js.map", false, true},
 		{"/src/SomeFolder/styles.css.map", false, true},
 
+		// AI agent temporary files
+		{"/src/SomeFolder/ServiceCollectionExtensions.cs.tmp.162720.ea80bb6bbe20", false, true},
+		{"/src/SomeFolder/OperationalSettingConfiguration.cs.tmp.162720.3a57ced2b041", false, true},
+		{"/src/SomeFolder/LegalSourceConfiguration.cs.tmp.162720.d752904c92b1", false, true},
+		{"/src/SomeFolder/LegalResearchItemConfiguration.cs.tmp.162720.ccb4c979dcf3", false, true},
+
 		// Custom Exclude extensions
 		{"/src/SomeFolder/schema.sql", false, true},
 		{"/src/SomeFolder/config.json", false, true},

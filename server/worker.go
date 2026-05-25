@@ -400,7 +400,8 @@ func (iw *IngestionWorker) ShouldIgnoreFile(path string, isDir bool) bool {
 		}
 		if (strings.HasPrefix(baseName, ".") && !isAllowedHiddenPath) ||
 			strings.HasPrefix(baseName, "~") ||
-			strings.HasSuffix(baseName, ".tmp") {
+			strings.HasSuffix(baseName, ".tmp") ||
+			strings.Contains(baseName, ".tmp.") {
 			return true
 		}
 	}
