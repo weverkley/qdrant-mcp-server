@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/google/uuid"
@@ -275,18 +276,18 @@ func (c *ConcurrencyController) decreaseLimit(reason string) {
 }
 
 type IngestionWorker struct {
-	Cfg                  Config
-	QdrantClient         QdrantClient
-	HTTPClient           *http.Client
-	Mu                   sync.Mutex
-	PendingFiles         map[string]time.Time
-	ActiveSyncs          int
-	TotalSynced          int
-	Sem                  chan struct{} // semaphore to rate limit concurrent embedding workers
-	GitignoreMatcher     *GitIgnoreMatcher
-	BatchUpserter        *BatchUpserter
+	Cfg                   Config
+	QdrantClient          QdrantClient
+	HTTPClient            *http.Client
+	Mu                    sync.Mutex
+	PendingFiles          map[string]time.Time
+	ActiveSyncs           int
+	TotalSynced           int
+	Sem                   chan struct{} // semaphore to rate limit concurrent embedding workers
+	GitignoreMatcher      *GitIgnoreMatcher
+	BatchUpserter         *BatchUpserter
 	ConcurrencyController *ConcurrencyController
-	CustomStopWords      map[string]struct{}
+	CustomStopWords       map[string]struct{}
 }
 
 func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgnoreMatcher) *IngestionWorker {
@@ -491,6 +492,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	extClean := strings.TrimPrefix(ext, ".")
 	relPath, _ := filepath.Rel(iw.Cfg.WatchDirectory, path)
 	relDirs := convertStringSlice(getParentDirs(relPath))
+	fileTags := buildFileTags(path, relPath, extClean)
 	var points []*qdrant.PointStruct
 
 	// Determine file categories based on ParserMode
@@ -508,14 +510,17 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	}
 
 	var functions []ast.FunctionNode
+	var imports []ast.ImportRef
 	var docChunks []ast.ChunkNode
 	var isDocParsed = false
 
 	if isSupportedCode {
-		var err error
-		functions, err = ast.ParseCodeToDocs(ctx, path, content)
+		parseResult, err := ast.ParseCodeToDocsWithMeta(ctx, path, content)
 		if err != nil {
 			log.Printf("AST parsing failed for %s: %v, falling back to simple chunking", path, err)
+		} else {
+			functions = parseResult.Functions
+			imports = parseResult.Imports
 		}
 	} else if isSupportedDoc {
 		_, chunks, err := ast.ParseTextToChunks(path)
@@ -552,6 +557,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				hash := sha1.Sum([]byte(deterministicSeed))
 				id, _ := uuid.FromBytes(hash[:16])
 
+				pointTags := mergeTags(fileTags, buildFunctionTags(fn, imports))
 				payload := map[string]interface{}{
 					"file_path":     path,
 					"content":       chunk,
@@ -563,6 +569,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 					"extension":     extClean,
 					"relative_path": relPath,
 					"relative_dirs": relDirs,
+					"tags":          convertStringSlice(pointTags),
 					"file_hash":     localHash,
 					"updated":       time.Now().Unix(),
 				}
@@ -570,10 +577,11 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 					payload["receiver"] = fn.Receiver
 				}
 
-				sIndices, sValues := ComputeSparseVector(chunk, iw.CustomStopWords)
+				searchText := buildSearchText(chunk, pointTags)
+				sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 				points = append(points, &qdrant.PointStruct{
-					Id:      qdrant.NewIDUUID(id.String()),
+					Id: qdrant.NewIDUUID(id.String()),
 					Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
 						"":       qdrant.NewVector(vector...),
 						"sparse": qdrant.NewVectorSparse(sIndices, sValues),
@@ -595,6 +603,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
+			pointTags := mergeTags(fileTags, []string{"document"})
 			payload := map[string]interface{}{
 				"file_path":     path,
 				"content":       chunk.Content,
@@ -603,6 +612,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				"extension":     extClean,
 				"relative_path": relPath,
 				"relative_dirs": relDirs,
+				"tags":          convertStringSlice(pointTags),
 				"file_hash":     localHash,
 				"updated":       time.Now().Unix(),
 			}
@@ -610,10 +620,11 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				payload["page_number"] = int64(chunk.PageNumber)
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk.Content, iw.CustomStopWords)
+			searchText := buildSearchText(chunk.Content, pointTags)
+			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
-				Id:      qdrant.NewIDUUID(id.String()),
+				Id: qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
 					"":       qdrant.NewVector(vector...),
 					"sparse": qdrant.NewVectorSparse(sIndices, sValues),
@@ -636,6 +647,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
+			pointTags := mergeTags(fileTags, []string{"file_chunk"})
 			payload := map[string]interface{}{
 				"file_path":     path,
 				"content":       chunk,
@@ -643,14 +655,16 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				"extension":     extClean,
 				"relative_path": relPath,
 				"relative_dirs": relDirs,
+				"tags":          convertStringSlice(pointTags),
 				"file_hash":     localHash,
 				"updated":       time.Now().Unix(),
 			}
 
-			sIndices, sValues := ComputeSparseVector(chunk, iw.CustomStopWords)
+			searchText := buildSearchText(chunk, pointTags)
+			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
-				Id:      qdrant.NewIDUUID(id.String()),
+				Id: qdrant.NewIDUUID(id.String()),
 				Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
 					"":       qdrant.NewVector(vector...),
 					"sparse": qdrant.NewVectorSparse(sIndices, sValues),
@@ -894,6 +908,7 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 	if err != nil {
 		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
 	}
+	queryTags := buildQueryTags(query, fileExtensions, pathPrefix)
 
 	var filterConditions []*qdrant.Condition
 
@@ -937,13 +952,16 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		searchMode = "dense"
 	}
 
+	candidateLimit := uint64(20)
+	finalLimit := 5
+
 	switch searchMode {
 	case "sparse":
 		sIndices, sValues := ComputeSparseVector(query, iw.CustomStopWords)
 		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQuerySparse(sIndices, sValues),
-			Limit:          qdrant.PtrOf(uint64(5)),
+			Limit:          qdrant.PtrOf(candidateLimit),
 			Filter:         qdrantFilter,
 			WithPayload:    qdrant.NewWithPayloadEnable(true),
 			Using:          qdrant.PtrOf("sparse"),
@@ -955,25 +973,25 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 			Prefetch: []*qdrant.PrefetchQuery{
 				{
 					Query:  qdrant.NewQueryDense(vector),
-					Limit:  qdrant.PtrOf(uint64(20)),
+					Limit:  qdrant.PtrOf(candidateLimit),
 					Filter: qdrantFilter,
 				},
 				{
 					Query:  qdrant.NewQuerySparse(sIndices, sValues),
 					Using:  qdrant.PtrOf("sparse"),
-					Limit:  qdrant.PtrOf(uint64(20)),
+					Limit:  qdrant.PtrOf(candidateLimit),
 					Filter: qdrantFilter,
 				},
 			},
 			Query:       qdrant.NewQueryFusion(qdrant.Fusion_RRF),
-			Limit:       qdrant.PtrOf(uint64(5)),
+			Limit:       qdrant.PtrOf(candidateLimit),
 			WithPayload: qdrant.NewWithPayloadEnable(true),
 		})
 	default: // "dense" or fallback
 		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQueryDense(vector),
-			Limit:          qdrant.PtrOf(uint64(5)),
+			Limit:          qdrant.PtrOf(candidateLimit),
 			Filter:         qdrantFilter,
 			WithPayload:    qdrant.NewWithPayloadEnable(true),
 		})
@@ -985,6 +1003,10 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 
 	if len(queryResponse) == 0 {
 		return "No relevant structural code blocks or reference components were found matching your query scope.", nil
+	}
+	queryResponse = rerankSearchResults(queryResponse, queryTags, pathPrefix)
+	if len(queryResponse) > finalLimit {
+		queryResponse = queryResponse[:finalLimit]
 	}
 
 	// Step C: Marshal points cleanly into an aggregate Markdown context layout
@@ -1002,6 +1024,7 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		if contentVal, exists := payloadMap["content"]; exists {
 			contentChunk = contentVal.GetStringValue()
 		}
+		tagList := payloadStringList(payloadMap, "tags")
 
 		// Detect if point is an AST function node
 		var typeStr string
@@ -1055,6 +1078,9 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		} else {
 			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, point.Score, lastSyncedStr))
 		}
+		if len(tagList) > 0 {
+			sb.WriteString(fmt.Sprintf("Tags: `%s`\n", strings.Join(tagList, "`, `")))
+		}
 
 		sb.WriteString(fmt.Sprintf("```%s\n", lang))
 		sb.WriteString(contentChunk)
@@ -1092,6 +1118,377 @@ func detectLanguage(filePath string) string {
 	default:
 		return strings.TrimPrefix(ext, ".")
 	}
+}
+
+func buildSearchText(content string, tags []string) string {
+	if len(tags) == 0 {
+		return content
+	}
+	return strings.Join(tags, " ") + "\n" + content
+}
+
+func buildFileTags(path, relPath, ext string) []string {
+	var tags []string
+	tags = append(tags, "file")
+	if ext != "" {
+		tags = append(tags, ext, detectLanguage(path))
+	}
+
+	normalizedRelPath := filepath.ToSlash(relPath)
+	tags = append(tags, tokenizeForTags(normalizedRelPath)...)
+	tags = append(tags, tokenizeForTags(filepath.Base(path))...)
+	tags = append(tags, classifyRoleTags(normalizedRelPath)...)
+
+	return uniqueSortedTags(tags)
+}
+
+func buildFunctionTags(fn ast.FunctionNode, imports []ast.ImportRef) []string {
+	var tags []string
+	tags = append(tags, "function", fn.Language)
+	tags = append(tags, tokenizeForTags(fn.Name)...)
+	tags = append(tags, tokenizeForTags(fn.Receiver)...)
+	tags = append(tags, classifyRoleTags(fn.Name)...)
+	tags = append(tags, classifyRoleTags(fn.Receiver)...)
+	tags = append(tags, inferImportTags(fn.Language, imports)...)
+
+	for _, imp := range imports {
+		tags = append(tags, tokenizeForTags(imp.RawPath)...)
+	}
+
+	return uniqueSortedTags(tags)
+}
+
+func mergeTags(groups ...[]string) []string {
+	var merged []string
+	for _, group := range groups {
+		merged = append(merged, group...)
+	}
+	return uniqueSortedTags(merged)
+}
+
+func tokenizeForTags(input string) []string {
+	normalized := filepath.ToSlash(input)
+	replacer := strings.NewReplacer(
+		".", " ",
+		"/", " ",
+		"\\", " ",
+		"-", " ",
+		"_", " ",
+		":", " ",
+		"(", " ",
+		")", " ",
+		"[", " ",
+		"]", " ",
+		"{", " ",
+		"}", " ",
+		",", " ",
+	)
+	normalized = replacer.Replace(normalized)
+
+	var expanded []string
+	for _, part := range strings.Fields(normalized) {
+		for _, token := range splitCamelCase(part) {
+			token = strings.TrimSpace(strings.ToLower(token))
+			if token == "" || len(token) < 2 {
+				continue
+			}
+			if _, isStopWord := stopWords[token]; isStopWord {
+				continue
+			}
+			expanded = append(expanded, token)
+		}
+	}
+	return uniqueSortedTags(expanded)
+}
+
+func splitCamelCase(s string) []string {
+	if s == "" {
+		return nil
+	}
+
+	var tokens []string
+	var current []rune
+	for i, r := range []rune(s) {
+		if i > 0 && unicode.IsUpper(r) && len(current) > 0 {
+			prev := current[len(current)-1]
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
+				tokens = append(tokens, string(current))
+				current = current[:0]
+			}
+		}
+		current = append(current, r)
+	}
+	if len(current) > 0 {
+		tokens = append(tokens, string(current))
+	}
+	return tokens
+}
+
+func classifyRoleTags(input string) []string {
+	lower := strings.ToLower(input)
+	roleMatchers := map[string][]string{
+		"test":           {"test", "tests", "spec", "fixture", "mock"},
+		"service":        {"service", "services"},
+		"controller":     {"controller", "controllers"},
+		"handler":        {"handler", "handlers", "endpoint"},
+		"repository":     {"repository", "repositories", "repo"},
+		"dto":            {"dto", "request", "response"},
+		"entity":         {"entity", "entities", "model"},
+		"domain":         {"domain"},
+		"application":    {"application", "app"},
+		"infrastructure": {"infrastructure", "infra"},
+		"api":            {"api", "http"},
+		"web":            {"web", "frontend", "ui"},
+		"command":        {"command", "commands"},
+		"query":          {"query", "queries"},
+		"event":          {"event", "events"},
+		"validator":      {"validator", "validation"},
+		"config":         {"config", "configuration", "settings"},
+		"migration":      {"migration", "migrations"},
+	}
+
+	var tags []string
+	for tag, patterns := range roleMatchers {
+		for _, pattern := range patterns {
+			if strings.Contains(lower, pattern) {
+				tags = append(tags, tag)
+				break
+			}
+		}
+	}
+	return uniqueSortedTags(tags)
+}
+
+func inferImportTags(language string, imports []ast.ImportRef) []string {
+	var tags []string
+	for _, imp := range imports {
+		raw := strings.ToLower(imp.RawPath)
+		switch language {
+		case "csharp":
+			tags = append(tags, matchCanonicalTags(raw, map[string][]string{
+				"xunit":            {"xunit"},
+				"nunit":            {"nunit"},
+				"mstest":           {"microsoft.visualstudio.testtools.unittesting"},
+				"efcore":           {"microsoft.entityframeworkcore", "entityframeworkcore"},
+				"mediatr":          {"mediatr"},
+				"fluentvalidation": {"fluentvalidation"},
+				"automapper":       {"automapper"},
+				"aspnetcore":       {"microsoft.aspnetcore", "aspnetcore"},
+				"serilog":          {"serilog"},
+				"dapper":           {"dapper"},
+				"hangfire":         {"hangfire"},
+				"massTransit":      {"masstransit"},
+			})...)
+		case "go":
+			tags = append(tags, matchCanonicalTags(raw, map[string][]string{
+				"gin":      {"github.com/gin-gonic/gin"},
+				"echo":     {"github.com/labstack/echo"},
+				"fiber":    {"github.com/gofiber/fiber"},
+				"chi":      {"github.com/go-chi/chi"},
+				"grpc":     {"google.golang.org/grpc", "grpc"},
+				"gorm":     {"gorm.io/gorm", "gorm.io"},
+				"sqlx":     {"github.com/jmoiron/sqlx"},
+				"cobra":    {"github.com/spf13/cobra"},
+				"viper":    {"github.com/spf13/viper"},
+				"testify":  {"github.com/stretchr/testify"},
+				"gqlgen":   {"github.com/99designs/gqlgen"},
+				"protobuf": {"google.golang.org/protobuf", "github.com/golang/protobuf"},
+			})...)
+		case "javascript", "typescript":
+			tags = append(tags, matchCanonicalTags(raw, map[string][]string{
+				"react":      {"react"},
+				"nextjs":     {"next", "nextjs"},
+				"express":    {"express"},
+				"nestjs":     {"@nestjs"},
+				"jest":       {"jest", "@jest"},
+				"vitest":     {"vitest"},
+				"playwright": {"playwright", "@playwright"},
+				"cypress":    {"cypress"},
+				"prisma":     {"prisma", "@prisma"},
+				"mongoose":   {"mongoose"},
+				"redux":      {"redux", "@reduxjs/toolkit"},
+				"vue":        {"vue"},
+				"nuxt":       {"nuxt"},
+			})...)
+		case "python":
+			tags = append(tags, matchCanonicalTags(raw, map[string][]string{
+				"django":     {"django"},
+				"flask":      {"flask"},
+				"fastapi":    {"fastapi"},
+				"pytest":     {"pytest"},
+				"sqlalchemy": {"sqlalchemy"},
+				"pydantic":   {"pydantic"},
+				"pandas":     {"pandas"},
+				"numpy":      {"numpy"},
+				"celery":     {"celery"},
+				"requests":   {"requests"},
+			})...)
+		case "php":
+			tags = append(tags, matchCanonicalTags(raw, map[string][]string{
+				"laravel":  {"illuminate", "laravel"},
+				"symfony":  {"symfony"},
+				"phpunit":  {"phpunit"},
+				"doctrine": {"doctrine"},
+				"livewire": {"livewire"},
+				"pest":     {"pest"},
+			})...)
+		}
+	}
+	return uniqueSortedTags(tags)
+}
+
+func matchCanonicalTags(raw string, patterns map[string][]string) []string {
+	var tags []string
+	for tag, candidates := range patterns {
+		for _, candidate := range candidates {
+			if strings.Contains(raw, strings.ToLower(candidate)) {
+				tags = append(tags, tag)
+				if tag == "xunit" || tag == "nunit" || tag == "mstest" || tag == "jest" || tag == "vitest" || tag == "playwright" || tag == "cypress" || tag == "pytest" || tag == "phpunit" || tag == "pest" || tag == "testify" {
+					tags = append(tags, "test")
+				}
+				break
+			}
+		}
+	}
+	return uniqueSortedTags(tags)
+}
+
+func uniqueSortedTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(strings.ToLower(tag))
+		if tag == "" {
+			continue
+		}
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func buildQueryTags(query string, fileExtensions []string, pathPrefix string) []string {
+	var tags []string
+	tags = append(tags, tokenizeForTags(query)...)
+	tags = append(tags, classifyRoleTags(query)...)
+
+	for _, ext := range fileExtensions {
+		cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
+		if cleanExt != "" {
+			tags = append(tags, cleanExt)
+		}
+	}
+
+	if pathPrefix != "" {
+		tags = append(tags, tokenizeForTags(pathPrefix)...)
+		tags = append(tags, classifyRoleTags(pathPrefix)...)
+	}
+
+	return uniqueSortedTags(tags)
+}
+
+func rerankSearchResults(points []*qdrant.ScoredPoint, queryTags []string, pathPrefix string) []*qdrant.ScoredPoint {
+	if len(points) == 0 {
+		return points
+	}
+
+	queryTagSet := make(map[string]struct{}, len(queryTags))
+	for _, tag := range queryTags {
+		queryTagSet[tag] = struct{}{}
+	}
+
+	cleanPrefix := filepath.ToSlash(strings.Trim(strings.ToLower(pathPrefix), "/"))
+	queryTokens := tokenizeForTags(strings.Join(queryTags, " "))
+
+	sort.SliceStable(points, func(i, j int) bool {
+		leftScore := boostedResultScore(points[i], queryTagSet, queryTokens, cleanPrefix)
+		rightScore := boostedResultScore(points[j], queryTagSet, queryTokens, cleanPrefix)
+		if leftScore == rightScore {
+			return points[i].Score > points[j].Score
+		}
+		return leftScore > rightScore
+	})
+
+	for _, point := range points {
+		point.Score = boostedResultScore(point, queryTagSet, queryTokens, cleanPrefix)
+	}
+
+	return points
+}
+
+func boostedResultScore(point *qdrant.ScoredPoint, queryTags map[string]struct{}, queryTokens []string, pathPrefix string) float32 {
+	score := point.Score
+	payload := point.Payload
+
+	matchCount := 0
+	for _, tag := range payloadStringList(payload, "tags") {
+		if _, ok := queryTags[tag]; ok {
+			matchCount++
+		}
+	}
+	score += float32(matchCount) * 0.25
+
+	filePath := ""
+	if pathVal, exists := payload["file_path"]; exists {
+		filePath = strings.ToLower(filepath.ToSlash(pathVal.GetStringValue()))
+	}
+	relPath := ""
+	if relVal, exists := payload["relative_path"]; exists {
+		relPath = strings.ToLower(filepath.ToSlash(relVal.GetStringValue()))
+	}
+	name := ""
+	if nameVal, exists := payload["name"]; exists {
+		name = strings.ToLower(nameVal.GetStringValue())
+	}
+
+	for _, token := range queryTokens {
+		if token == "" {
+			continue
+		}
+		if name != "" && strings.Contains(name, token) {
+			score += 0.35
+		}
+		if relPath != "" && strings.Contains(relPath, token) {
+			score += 0.15
+		}
+	}
+
+	if pathPrefix != "" && (strings.Contains(relPath, pathPrefix) || strings.Contains(filePath, pathPrefix)) {
+		score += 0.5
+	}
+
+	return score
+}
+
+func payloadStringList(payload map[string]*qdrant.Value, key string) []string {
+	val, exists := payload[key]
+	if !exists || val == nil {
+		return nil
+	}
+
+	listVal := val.GetListValue()
+	if listVal == nil {
+		return nil
+	}
+
+	out := make([]string, 0, len(listVal.Values))
+	for _, item := range listVal.Values {
+		if item == nil {
+			continue
+		}
+		str := strings.TrimSpace(strings.ToLower(item.GetStringValue()))
+		if str != "" {
+			out = append(out, str)
+		}
+	}
+	return out
 }
 
 func getParentDirs(relPath string) []string {
@@ -1150,11 +1547,11 @@ var stopWords = map[string]struct{}{
 	"cant": {}, "cannot": {}, "could": {}, "couldnt": {},
 	"did": {}, "didnt": {}, "do": {}, "does": {}, "doesnt": {}, "doing": {}, "dont": {}, "down": {}, "during": {},
 	"each": {},
-	"few": {}, "for": {}, "from": {}, "further": {},
+	"few":  {}, "for": {}, "from": {}, "further": {},
 	"had": {}, "hadnt": {}, "has": {}, "hasnt": {}, "have": {}, "havent": {}, "having": {}, "he": {}, "hed": {}, "hell": {}, "hes": {}, "her": {}, "here": {}, "heres": {}, "hers": {}, "herself": {}, "him": {}, "himself": {}, "his": {}, "how": {}, "hows": {},
 	"i": {}, "id": {}, "ill": {}, "im": {}, "ive": {}, "if": {}, "in": {}, "into": {}, "is": {}, "isnt": {}, "it": {}, "its": {}, "itself": {},
 	"lets": {},
-	"me": {}, "more": {}, "most": {}, "mustnt": {}, "my": {}, "myself": {},
+	"me":   {}, "more": {}, "most": {}, "mustnt": {}, "my": {}, "myself": {},
 	"no": {}, "nor": {}, "not": {},
 	"of": {}, "off": {}, "on": {}, "once": {}, "only": {}, "or": {}, "other": {}, "ought": {}, "our": {}, "ours": {}, "ourselves": {}, "out": {}, "over": {}, "own": {},
 	"same": {}, "shant": {}, "she": {}, "shed": {}, "shell": {}, "shes": {}, "should": {}, "shouldnt": {}, "so": {}, "some": {}, "such": {},

@@ -28,6 +28,8 @@ type MockQdrantClient struct {
 	scrollErr   error
 	deleteCalls []string
 	queryCalls  []*qdrant.QueryPoints
+	queryResp   []*qdrant.ScoredPoint
+	queryErr    error
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -56,7 +58,7 @@ func (m *MockQdrantClient) Query(ctx context.Context, in *qdrant.QueryPoints) ([
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.queryCalls = append(m.queryCalls, in)
-	return nil, nil
+	return m.queryResp, m.queryErr
 }
 
 func (m *MockQdrantClient) Scroll(ctx context.Context, in *qdrant.ScrollPoints) ([]*qdrant.RetrievedPoint, error) {
@@ -826,4 +828,257 @@ func TestWatchLoop_WatchesNewDirectories(t *testing.T) {
 			t.Fatalf("Timed out waiting for watcher event for %s", newFile)
 		}
 	}
+}
+
+func TestSyncFileState_AddsTagsToPayload(t *testing.T) {
+	rootDir := t.TempDir()
+	testFile := filepath.Join(rootDir, "tests", "AgroOps.Application.Tests", "DtcFrameDecoderServiceTests.cs")
+	if err := os.MkdirAll(filepath.Dir(testFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `using Xunit;
+namespace AgroOps.Application.Tests;
+public class DtcFrameDecoderServiceTests
+{
+    public void DecodeFrame_ShouldReturnExpectedResult() {}
+}`
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &MockQdrantClient{}
+	worker := server.NewIngestionWorker(server.Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      rootDir,
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		ParserMode:          "full",
+		MaxEmbeddingWorkers: 1,
+		BatchSize:           1,
+		BatchTimeout:        time.Second,
+	}, mockClient, nil)
+	defer worker.Close()
+
+	worker.HTTPClient.Transport = &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			respBody := `{"embedding": [0.1, 0.2, 0.3]}`
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	worker.SyncFileState(context.Background(), testFile)
+	worker.BatchUpserter.Flush()
+
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+	if len(mockClient.upsertCalls) == 0 || len(mockClient.upsertCalls[0]) == 0 {
+		t.Fatalf("Expected at least one upserted point")
+	}
+
+	payload := mockClient.upsertCalls[0][0].Payload
+	tagVals, ok := payload["tags"]
+	if !ok {
+		t.Fatalf("Expected tags payload to be present")
+	}
+
+	var tags []string
+	for _, v := range tagVals.GetListValue().Values {
+		tags = append(tags, v.GetStringValue())
+	}
+
+	expectedTags := []string{"test", "service", "decoder", "dtc", "csharp", "application", "xunit"}
+	for _, expected := range expectedTags {
+		if !containsString(tags, expected) {
+			t.Fatalf("Expected tag %q in payload tags %v", expected, tags)
+		}
+	}
+}
+
+func TestSyncFileState_AddsFrameworkTagsForOtherLanguages(t *testing.T) {
+	testCases := []struct {
+		name         string
+		relPath      string
+		content      string
+		expectedTags []string
+	}{
+		{
+			name:         "Go",
+			relPath:      "internal/api/user_handler_test.go",
+			content:      "package api\n\nimport (\n\t\"github.com/gin-gonic/gin\"\n\t\"github.com/stretchr/testify/require\"\n)\n\nfunc TestHandler() {}\n",
+			expectedTags: []string{"go", "gin", "testify", "test", "api", "handler"},
+		},
+		{
+			name:         "TypeScript",
+			relPath:      "web/src/components/UserList.spec.ts",
+			content:      "import React from 'react'\nimport { describe, it } from 'vitest'\n\nexport function UserList() { return <div /> }\n",
+			expectedTags: []string{"typescript", "react", "vitest", "test", "web"},
+		},
+		{
+			name:         "Python",
+			relPath:      "services/orders/test_api.py",
+			content:      "from fastapi import FastAPI\nimport pytest\n\ndef test_orders_api():\n    assert True\n",
+			expectedTags: []string{"python", "fastapi", "pytest", "test", "service", "api"},
+		},
+		{
+			name:         "PHP",
+			relPath:      "app/Infrastructure/UserRepositoryTest.php",
+			content:      "<?php\nuse PHPUnit\\Framework\\TestCase;\nuse Doctrine\\ORM\\EntityManager;\nclass UserRepositoryTest extends TestCase {}\n",
+			expectedTags: []string{"php", "phpunit", "doctrine", "test", "repository", "infrastructure"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rootDir := t.TempDir()
+			filePath := filepath.Join(rootDir, filepath.FromSlash(tc.relPath))
+			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filePath, []byte(tc.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			mockClient := &MockQdrantClient{}
+			worker := newTestWorker(rootDir, mockClient)
+			defer worker.Close()
+
+			worker.SyncFileState(context.Background(), filePath)
+			worker.BatchUpserter.Flush()
+
+			tags := payloadTagsFromFirstPoint(t, mockClient)
+			for _, expected := range tc.expectedTags {
+				if !containsString(tags, expected) {
+					t.Fatalf("Expected tag %q in payload tags %v", expected, tags)
+				}
+			}
+		})
+	}
+}
+
+func TestExecuteVectorSearch_ReranksUsingTags(t *testing.T) {
+	mockClient := &MockQdrantClient{
+		queryResp: []*qdrant.ScoredPoint{
+			{
+				Score: 0.92,
+				Payload: qdrant.NewValueMap(map[string]interface{}{
+					"file_path":     "/repo/src/DiagnosticsController.cs",
+					"relative_path": "src/DiagnosticsController.cs",
+					"content":       "public class DiagnosticsController {}",
+					"type":          "function",
+					"name":          "GetStatus",
+					"updated":       int64(1716570000),
+					"tags":          []interface{}{"controller", "diagnostics", "status"},
+				}),
+			},
+			{
+				Score: 0.61,
+				Payload: qdrant.NewValueMap(map[string]interface{}{
+					"file_path":     "/repo/tests/AgroOps.Application.Tests/DtcFrameDecoderServiceTests.cs",
+					"relative_path": "tests/AgroOps.Application.Tests/DtcFrameDecoderServiceTests.cs",
+					"content":       "public class DtcFrameDecoderServiceTests {}",
+					"type":          "function",
+					"name":          "DecodeFrame_ShouldReturnExpectedResult",
+					"updated":       int64(1716570001),
+					"tags":          []interface{}{"test", "service", "decoder", "dtc", "csharp"},
+				}),
+			},
+		},
+	}
+
+	worker := server.NewIngestionWorker(server.Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      "/repo",
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		ParserMode:          "full",
+		MaxEmbeddingWorkers: 1,
+		SearchMode:          "hybrid",
+	}, mockClient, nil)
+	defer worker.Close()
+
+	worker.HTTPClient.Transport = &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			respBody := `{"embedding": [0.1, 0.2, 0.3]}`
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	result, err := worker.ExecuteVectorSearch(context.Background(), "dtc frame decoder service tests", nil, "tests")
+	if err != nil {
+		t.Fatalf("ExecuteVectorSearch returned error: %v", err)
+	}
+
+	firstDiagnostics := strings.Index(result, "DiagnosticsController")
+	firstDecoderTest := strings.Index(result, "DtcFrameDecoderServiceTests.cs")
+	if firstDecoderTest == -1 {
+		t.Fatalf("Expected test file in search results, got: %s", result)
+	}
+	if firstDiagnostics != -1 && firstDiagnostics < firstDecoderTest {
+		t.Fatalf("Expected decoder test result to rank ahead of diagnostics controller. Result:\n%s", result)
+	}
+}
+
+func containsString(slice []string, target string) bool {
+	for _, item := range slice {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func newTestWorker(rootDir string, mockClient *MockQdrantClient) *server.IngestionWorker {
+	worker := server.NewIngestionWorker(server.Config{
+		CollectionName:      "test-collection",
+		WatchDirectory:      rootDir,
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		ParserMode:          "full",
+		MaxEmbeddingWorkers: 1,
+		BatchSize:           1,
+		BatchTimeout:        time.Second,
+	}, mockClient, nil)
+
+	worker.HTTPClient.Transport = &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			respBody := `{"embedding": [0.1, 0.2, 0.3]}`
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(respBody)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	return worker
+}
+
+func payloadTagsFromFirstPoint(t *testing.T, mockClient *MockQdrantClient) []string {
+	t.Helper()
+
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+	if len(mockClient.upsertCalls) == 0 || len(mockClient.upsertCalls[0]) == 0 {
+		t.Fatalf("Expected at least one upserted point")
+	}
+
+	payload := mockClient.upsertCalls[0][0].Payload
+	tagVals, ok := payload["tags"]
+	if !ok {
+		t.Fatalf("Expected tags payload to be present")
+	}
+
+	var tags []string
+	for _, v := range tagVals.GetListValue().Values {
+		tags = append(tags, v.GetStringValue())
+	}
+	return tags
 }
