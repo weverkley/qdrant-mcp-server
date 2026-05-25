@@ -1,0 +1,34 @@
+# Exclude Git files
+.git
+.github
+.gitignore
+
+# Exclude local build artifacts and binaries
+qdrant-mcp-server
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Exclude IDE and editor configurations
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.omx/
+.antigravitycli/
+
+# Exclude logs and temporary directories
+*.log
+tmp/
+temp/
+
+# Exclude Docker configs from the context
+Dockerfile
+docker-compose.yml
+.dockerignore

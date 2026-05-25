@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Qdrant Vector Database
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.10.0
+    container_name: qdrant
+    ports:
+      - "6333:6333" # HTTP REST API & Web Dashboard (http://localhost:6333/dashboard)
+      - "6334:6334" # gRPC Interface (used by the MCP server for high-speed indexing)
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - RUST_LOG=info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/readyz || wget -qO- http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 2. Ollama AI Engine
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434" # Ollama API Endpoint
+    volumes:
+      - ollama_storage:/root/.ollama
+    restart: unless-stopped
+    # 💡 UNCOMMENT the deploy block below if you have an NVIDIA GPU for massive acceleration!
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/ || wget -qO- http://localhost:11434/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # 3. Model Downloader (Automated nomic-embed-text Puller)
+  # ---------------------------------------------------------------------------
+  ollama-pull-model:
+    image: curlimages/curl:latest
+    container_name: ollama-pull-model
+    entrypoint: 
+      - "sh"
+      - "-c"
+      - |
+        echo "Waiting for Ollama container to start..."
+        until curl -s http://ollama:11434/api/tags >/dev/null; do
+          sleep 1
+        done
+        echo "Ollama is ready. Checking/pulling nomic-embed-text model..."
+        curl -s -N -X POST http://ollama:11434/api/pull -d '{"name": "nomic-embed-text"}'
+        echo ""
+        echo "nomic-embed-text embedding model is successfully prepared and ready!"
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # 4. Go Qdrant-RAG MCP Server Container (Containerized Run Option)
+  # ---------------------------------------------------------------------------
+  qdrant-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qdrant-mcp-server
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6334
+      - QDRANT_COLLECTION=codebase_RAG
+      - OLLAMA_HOST=http://ollama:11434
+      - EMBEDDING_MODEL=nomic-embed-text
+      - WATCH_DIRECTORY=/workspace
+      # Optional performance tuning configurations:
+      # - PARSER_MODE=full
+      # - MAX_EMBEDDING_WORKERS=5
+      # - BATCH_SIZE=100
+      # - SEARCH_MODE=dense
+      # - LOG_TO_FILE=false
+    volumes:
+      # Mount the project workspace or directories you want to index.
+      # By default, mounts the current folder into '/workspace' inside the container.
+      - .:/workspace
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama-pull-model:
+        condition: service_completed_successfully
+
+volumes:
+  qdrant_storage:
+    name: qdrant_storage
+  ollama_storage:
+    name: ollama_storage
