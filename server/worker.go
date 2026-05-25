@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -788,23 +789,45 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 	if workerCount <= 0 {
 		workerCount = 5
 	}
-	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", len(filesToIngest), workerCount)
+	total := len(filesToIngest)
+	log.Printf("Found %d files to ingest. Starting concurrent ingestion (max workers: %d)...", total, workerCount)
 
 	type job struct {
 		idx  int
 		path string
 	}
-	jobs := make(chan job, len(filesToIngest))
+	jobs := make(chan job, total)
 	for i, p := range filesToIngest {
 		jobs <- job{i, p}
 	}
 	close(jobs)
 
 	var (
-		wg     sync.WaitGroup
-		syncMu sync.Mutex
-		synced int
+		wg       sync.WaitGroup
+		syncMu   sync.Mutex
+		synced   int
+		progress int64
 	)
+
+	var stopProgress chan struct{}
+	if iw.Cfg.LogToFile && total > 0 {
+		fmt.Fprintf(os.Stderr, "[qdrant-mcp] Ingesting %d files...\n", total)
+		stopProgress = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					n := atomic.LoadInt64(&progress)
+					fmt.Fprintf(os.Stderr, "\r[qdrant-mcp] %d/%d files", n, total)
+				case <-stopProgress:
+					return
+				}
+			}
+		}()
+	}
+
 	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
 		go func() {
@@ -813,8 +836,9 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 				if ctx.Err() != nil {
 					return
 				}
-				log.Printf("[%d/%d] Ingesting %s...", j.idx+1, len(filesToIngest), j.path)
+				log.Printf("[%d/%d] Ingesting %s...", j.idx+1, total, j.path)
 				iw.SyncFileState(ctx, j.path)
+				atomic.AddInt64(&progress, 1)
 				syncMu.Lock()
 				synced++
 				syncMu.Unlock()
@@ -822,6 +846,11 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 		}()
 	}
 	wg.Wait()
+
+	if stopProgress != nil {
+		close(stopProgress)
+		fmt.Fprintf(os.Stderr, "\r[qdrant-mcp] Done: %d/%d files ingested\n", atomic.LoadInt64(&progress), total)
+	}
 
 	iw.Mu.Lock()
 	iw.TotalSynced += synced

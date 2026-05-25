@@ -49,7 +49,7 @@ graph TD
 
 ## ✨ Key Features
 
-- **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, and Python to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching.
+- **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, and Python to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching. Covers a broad set of grammar variants per language — including arrow functions, interface/type-alias/enum declarations (TypeScript), record/enum types (C#), interface/trait declarations (PHP), and file-scoped namespaces (C# 10+). Previously parsed trees are cached per file so re-indexing on save only re-parses changed AST branches (incremental tree reuse).
 - **⚡ Concurrent Rate-Limited Ingestion:** Accelerates workspace indexing by walking and parsing files concurrently using Goroutines and `sync.WaitGroup` while preventing Ollama server overload via a configurable buffered semaphore pool (`MAX_EMBEDDING_WORKERS`).
 - **⚡ Real-Time Indexing:** Uses OS-level file notifications (`fsnotify`) to watch your code workspace recursively. Any write, create, or delete operation immediately reflects in your vector database.
 - **🛡️ Intelligent Ignoring & Filters:** Automatically respects your `.gitignore` files recursively across the workspace, skipping untracked files and folders (like build artifacts or node modules) instantly during crawling and watch events. Also includes fallback configuration parameters to strictly exclude additional folders or whitelist particular hidden directories.
@@ -78,8 +78,10 @@ The server relies on the following environment variables for its configuration:
 | `MAX_EMBEDDING_WORKERS` | Max concurrent worker threads doing Ollama embeddings. | `5` | No |
 | `BATCH_SIZE` | Batch size for vector upserts. | `100` | No |
 | `BATCH_TIMEOUT` | Batch timeout for vector upserts (e.g. `200ms`, `1s`). | `200ms` | No |
-| `LOG_TO_FILE` | Enable logging to `.qdrant-mcp-server/qdrant-mcp-server.log` physical file. | `false` | No |
+| `LOG_TO_FILE` | Enable logging to `.qdrant-mcp-server/qdrant-mcp-server.log` physical file. When enabled, concise ingestion progress (`X/Y files`) is printed to the console instead. | `false` | No |
 | `SEARCH_MODE` | Vector search mode: `dense` (pure semantic), `sparse` (precise keyword), or `hybrid` (dense + sparse combined using Reciprocal Rank Fusion RRF). | `dense` | No |
+| `EXCLUDE_EXTENSIONS` | Comma-separated file extensions to skip during indexing (e.g. `.sql,.lock,.sum`). | `.sql` | No |
+| `MAX_FILE_SIZE_BYTES` | Maximum file size in bytes to index. Files larger than this are skipped. | `1048576` (1 MB) | No |
 
 ---
 
