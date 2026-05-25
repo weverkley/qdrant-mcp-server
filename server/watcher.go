@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -17,6 +19,16 @@ func (iw *IngestionWorker) WatchLoop(ctx context.Context, watcher *fsnotify.Watc
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
+			}
+
+			if event.Has(fsnotify.Create) {
+				info, err := os.Stat(event.Name)
+				if err == nil && info.IsDir() {
+					if err := iw.addWatchRecursive(watcher, event.Name); err != nil {
+						log.Printf("Failed to attach watcher to new directory %s: %v", event.Name, err)
+					}
+					continue
+				}
 			}
 
 			if iw.ShouldIgnoreFile(event.Name, false) {
@@ -34,6 +46,27 @@ func (iw *IngestionWorker) WatchLoop(ctx context.Context, watcher *fsnotify.Watc
 			log.Printf("Fsnotify interface raised exception: %v", err)
 		}
 	}
+}
+
+func (iw *IngestionWorker) addWatchRecursive(watcher *fsnotify.Watcher, root string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			return nil
+		}
+
+		if iw.ShouldIgnoreFile(path, true) {
+			if path == root {
+				return nil
+			}
+			return filepath.SkipDir
+		}
+
+		return watcher.Add(path)
+	})
 }
 
 func (iw *IngestionWorker) IngestionConsumer(ctx context.Context, eventChan <-chan string) {

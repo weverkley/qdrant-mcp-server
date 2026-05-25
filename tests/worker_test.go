@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/qdrant/go-client/qdrant"
 
 	"qdrant-mcp-server/server"
@@ -688,7 +689,7 @@ func TestComputeSparseVector_CustomStopWords(t *testing.T) {
 func TestShouldIgnoreFile(t *testing.T) {
 	mockClient := &MockQdrantClient{}
 	Cfg := server.Config{
-		ExcludeDirs: []string{"node_modules"},
+		ExcludeDirs:       []string{"node_modules"},
 		IncludeHiddenDirs: []string{".allowed-hidden"},
 		ExcludeExtensions: []string{".sql", "json"},
 	}
@@ -774,7 +775,55 @@ func TestSyncFileState_MaxFileSize(t *testing.T) {
 	}
 }
 
+func TestWatchLoop_WatchesNewDirectories(t *testing.T) {
+	rootDir := t.TempDir()
 
+	mockClient := &MockQdrantClient{}
+	worker := server.NewIngestionWorker(server.Config{
+		WatchDirectory:      rootDir,
+		DebounceDuration:    10 * time.Millisecond,
+		ExcludeExtensions:   []string{".sql"},
+		MaxEmbeddingWorkers: 1,
+	}, mockClient, nil)
+	defer worker.Close()
 
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("Failed to create watcher: %v", err)
+	}
+	defer watcher.Close()
 
+	if err := watcher.Add(rootDir); err != nil {
+		t.Fatalf("Failed to watch root directory: %v", err)
+	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	eventChan := make(chan string, 10)
+	go worker.WatchLoop(ctx, watcher, eventChan)
+
+	newDir := filepath.Join(rootDir, "tests", "AgroOps.Application.Tests")
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		t.Fatalf("Failed to create nested directory: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	newFile := filepath.Join(newDir, "DtcFrameDecoderServiceTests.cs")
+	if err := os.WriteFile(newFile, []byte("class DtcFrameDecoderServiceTests {}"), 0644); err != nil {
+		t.Fatalf("Failed to create file in new directory: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case path := <-eventChan:
+			if path == newFile {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("Timed out waiting for watcher event for %s", newFile)
+		}
+	}
+}

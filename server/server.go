@@ -137,24 +137,7 @@ func Start(version string) {
 	go worker.IngestionConsumer(ctx, eventChan)
 
 	// Recursively monitor target codebase structure
-	err = filepath.WalkDir(cfg.WatchDirectory, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		isDir := d.IsDir()
-		if worker.ShouldIgnoreFile(path, isDir) {
-			if isDir {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if isDir {
-			return watcher.Add(path)
-		}
-		return nil
-	})
+	err = worker.addWatchRecursive(watcher, cfg.WatchDirectory)
 	if err != nil {
 		log.Printf("Warning: Directory traversal hit path restrictions: %v", err)
 	}
