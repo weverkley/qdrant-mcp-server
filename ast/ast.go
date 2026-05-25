@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -24,16 +26,15 @@ import (
 )
 
 type languageInfo struct {
-	lang        *sitter.Language
-	goExtractor bool
-	key         string
+	lang *sitter.Language
+	key  string
 }
 
 // languageForExt selects a tree-sitter language based on file extension.
 func languageForExt(ext string) languageInfo {
 	switch ext {
 	case ".go":
-		return languageInfo{lang: sittergo.GetLanguage(), goExtractor: true, key: "go"}
+		return languageInfo{lang: sittergo.GetLanguage(), key: "go"}
 	case ".js", ".jsx", ".mjs", ".cjs":
 		return languageInfo{lang: sitterjs.GetLanguage(), key: "javascript"}
 	case ".ts", ".tsx":
@@ -47,6 +48,80 @@ func languageForExt(ext string) languageInfo {
 	default:
 		return languageInfo{}
 	}
+}
+
+type queryMetadata struct {
+	Namespace string
+	Types     []string
+	Imports   []ImportRef
+}
+
+type queryPatternSpec struct {
+	name    string
+	pattern string
+}
+
+var parserPools sync.Map
+var queryCache sync.Map
+var queryErrorCache sync.Map
+
+var metadataQuerySpecs = map[string][]queryPatternSpec{
+	"go": {
+		{name: "namespace", pattern: `(package_clause (package_identifier) @namespace)`},
+		{name: "type", pattern: `(type_spec name: (type_identifier) @type.name)`},
+		{name: "import", pattern: `(import_spec path: (interpreted_string_literal) @import.path)`},
+		{name: "import_raw", pattern: `(import_spec path: (raw_string_literal) @import.path)`},
+	},
+	"javascript": {
+		{name: "type", pattern: `(class_declaration name: (identifier) @type.name)`},
+		{name: "import", pattern: `(import_statement source: (string (string_fragment) @import.path))`},
+	},
+	"typescript": {
+		{name: "type", pattern: `(class_declaration name: (identifier) @type.name)`},
+		{name: "import", pattern: `(import_statement source: (string (string_fragment) @import.path))`},
+	},
+	"csharp": {
+		{name: "namespace", pattern: `(namespace_declaration name: (_) @namespace)`},
+		{name: "type_class", pattern: `(class_declaration name: (identifier) @type.name)`},
+		{name: "type_interface", pattern: `(interface_declaration name: (identifier) @type.name)`},
+		{name: "type_struct", pattern: `(struct_declaration name: (identifier) @type.name)`},
+		{name: "import", pattern: `(using_directive name: (_) @import.path)`},
+	},
+	"python": {
+		{name: "type", pattern: `(class_definition name: (identifier) @type.name)`},
+		{name: "import", pattern: `(import_statement name: (dotted_name) @import.path)`},
+		{name: "import_from", pattern: `(import_from_statement module_name: (dotted_name) @import.path)`},
+	},
+	"php": {
+		{name: "namespace", pattern: `(namespace_definition name: (_) @namespace)`},
+		{name: "type", pattern: `(class_declaration name: (name) @type.name)`},
+		{name: "import", pattern: `(namespace_use_declaration (namespace_use_clause name: (_) @import.path))`},
+	},
+}
+
+var functionQuerySpecs = map[string][]queryPatternSpec{
+	"go": {
+		{name: "function", pattern: `(function_declaration name: (identifier) @func.name) @func.node`},
+		{name: "method", pattern: `(method_declaration receiver: (parameter_list) @func.receiver name: (field_identifier) @func.name) @func.node`},
+	},
+	"javascript": {
+		{name: "function", pattern: `(function_declaration name: (identifier) @func.name) @func.node`},
+		{name: "method", pattern: `(method_definition name: (property_identifier) @func.name) @func.node`},
+	},
+	"typescript": {
+		{name: "function", pattern: `(function_declaration name: (identifier) @func.name) @func.node`},
+		{name: "method", pattern: `(method_definition name: (property_identifier) @func.name) @func.node`},
+	},
+	"php": {
+		{name: "function", pattern: `(function_definition name: (name) @func.name) @func.node`},
+		{name: "method", pattern: `(method_declaration name: (name) @func.name) @func.node`},
+	},
+	"csharp": {
+		{name: "method", pattern: `(method_declaration name: (identifier) @func.name) @func.node`},
+	},
+	"python": {
+		{name: "function", pattern: `(function_definition name: (identifier) @func.name) @func.node`},
+	},
 }
 
 func languageLabel(ext string) string {
@@ -113,32 +188,34 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 	var types []string
 
 	if info.lang != nil {
-		parser := sitter.NewParser()
-		parser.SetLanguage(info.lang)
+		parser := acquireParser(info)
+		defer releaseParser(info, parser)
 
 		tree, err := parser.ParseCtx(ctx, nil, fileContent)
 		if tree != nil {
+			queryMeta := extractMetadataWithQueries(info, tree.RootNode(), fileContent)
+			functions = extractFunctionsWithQueries(info, tree.RootNode(), fileContent, queryMeta.Namespace)
 			switch info.key {
 			case "go":
-				functions, types = findGoFunctions(tree.RootNode(), fileContent)
-				imports = parseGoImports(string(fileContent))
-				namespace = parseGoPackage(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parseGoImports(string(fileContent)))
+				namespace = firstNonEmptyString(queryMeta.Namespace, parseGoPackage(string(fileContent)))
 			case "javascript":
-				functions, types = findJSFunctions(tree.RootNode(), fileContent)
-				imports = parseJSImports(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parseJSImports(string(fileContent)))
+				namespace = queryMeta.Namespace
 			case "typescript":
-				functions, types = findTSFunctions(tree.RootNode(), fileContent)
-				imports = parseTSImports(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parseTSImports(string(fileContent)))
+				namespace = queryMeta.Namespace
 			case "php":
-				functions, types, namespace = findPHPFunctions(tree.RootNode(), fileContent)
-				imports = parsePHPImports(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parsePHPImports(string(fileContent)))
+				namespace = firstNonEmptyString(queryMeta.Namespace, parsePHPNamespace(string(fileContent)))
 			case "csharp":
-				functions, types, namespace = findCSharpFunctions(tree.RootNode(), fileContent)
-				imports = parseCSharpImports(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parseCSharpImports(string(fileContent)))
+				namespace = firstNonEmptyString(queryMeta.Namespace, parseCSharpNamespace(string(fileContent)))
 			case "python":
-				functions, types = findPythonFunctions(tree.RootNode(), fileContent)
-				imports = parsePythonImports(string(fileContent))
+				imports = chooseImportFallback(queryMeta.Imports, parsePythonImports(string(fileContent)))
+				namespace = queryMeta.Namespace
 			}
+			types = uniqueStrings(queryMeta.Types)
 		}
 		_ = err
 	}
@@ -179,206 +256,90 @@ func genericFunctionNodes(filePath string, fileContent []byte) []FunctionNode {
 	}}
 }
 
-// Go parser helpers
-func findGoFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
-	var functions []FunctionNode
-	var types []string
+func extractFunctionsWithQueries(info languageInfo, root *sitter.Node, content []byte, namespace string) []FunctionNode {
+	specs := functionQuerySpecs[info.key]
+	if len(specs) == 0 || root == nil || info.lang == nil {
+		return nil
+	}
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
-		if n == nil {
-			return
+	var functions []FunctionNode
+	seen := make(map[string]struct{})
+	for _, spec := range specs {
+		query, err := loadQuery(info, spec)
+		if err != nil || query == nil {
+			continue
 		}
-		if n.Type() == "method_declaration" || n.Type() == "function_declaration" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				name := nameNode.Content(content)
-				start := int(n.StartPoint().Row) + 1
-				end := int(n.EndPoint().Row) + 1
-				sig := string(content[n.StartByte():n.EndByte()])
-				recv := ""
-				container := ""
-				if n.Type() == "method_declaration" {
-					recvNode := n.ChildByFieldName("receiver")
-					if recvNode != nil {
-						recv = recvNode.Content(content)
-						container = receiverTypeName(recv)
-					}
-				}
-				functions = append(functions, FunctionNode{
-					Name:      name,
-					Signature: sig,
-					StartLine: start,
-					EndLine:   end,
-					Receiver:  recv,
-					Container: container,
-				})
+
+		cursor := sitter.NewQueryCursor()
+		cursor.Exec(query, root)
+		for {
+			match, ok := cursor.NextMatch()
+			if !ok {
+				break
 			}
-		}
-		if n.Type() == "type_spec" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				types = append(types, nameNode.Content(content))
+
+			fn := buildFunctionFromMatch(info, query, match, content, namespace)
+			if fn == nil || fn.Name == "" {
+				continue
 			}
+
+			key := fmt.Sprintf("%s|%d|%d", fn.Name, fn.StartLine, fn.EndLine)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			functions = append(functions, *fn)
 		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+		cursor.Close()
+	}
+
+	sort.SliceStable(functions, func(i, j int) bool {
+		if functions[i].StartLine == functions[j].StartLine {
+			return functions[i].Name < functions[j].Name
+		}
+		return functions[i].StartLine < functions[j].StartLine
+	})
+
+	return functions
+}
+
+func buildFunctionFromMatch(info languageInfo, query *sitter.Query, match *sitter.QueryMatch, content []byte, namespace string) *FunctionNode {
+	var fnNode, nameNode, receiverNode *sitter.Node
+	for _, capture := range match.Captures {
+		captureName := query.CaptureNameForId(capture.Index)
+		switch captureName {
+		case "func.node":
+			fnNode = capture.Node
+		case "func.name":
+			nameNode = capture.Node
+		case "func.receiver":
+			receiverNode = capture.Node
 		}
 	}
 
-	walk(root)
-	return functions, uniqueStrings(types)
-}
-
-// JavaScript parser helpers
-func findJSFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
-	var functions []FunctionNode
-	var types []string
-
-	var walk func(n *sitter.Node, currentClass string)
-	walk = func(n *sitter.Node, currentClass string) {
-		if n == nil {
-			return
-		}
-		if n.Type() == "class_declaration" || n.Type() == "class" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				currentClass = nameNode.Content(content)
-				types = append(types, currentClass)
-			}
-		}
-		if n.Type() == "function_declaration" || n.Type() == "method_definition" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				name := nameNode.Content(content)
-				start := int(n.StartPoint().Row) + 1
-				end := int(n.EndPoint().Row) + 1
-				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass})
-			}
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), currentClass)
-		}
+	if fnNode == nil || nameNode == nil {
+		return nil
 	}
 
-	walk(root, "")
-	return functions, uniqueStrings(types)
-}
-
-// TypeScript parser helpers
-func findTSFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
-	return findJSFunctions(root, content)
-}
-
-// PHP parser helpers
-func findPHPFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string, string) {
-	var functions []FunctionNode
-	var types []string
-	namespace := parsePHPNamespace(string(content))
-
-	var walk func(n *sitter.Node, currentClass string)
-	walk = func(n *sitter.Node, currentClass string) {
-		if n == nil {
-			return
-		}
-		if n.Type() == "class_declaration" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				currentClass = nameNode.Content(content)
-				types = append(types, currentClass)
-			}
-		}
-		if n.Type() == "function_definition" || n.Type() == "method_declaration" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				name := nameNode.Content(content)
-				start := int(n.StartPoint().Row) + 1
-				end := int(n.EndPoint().Row) + 1
-				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass, Namespace: namespace})
-			}
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), currentClass)
-		}
+	receiver := ""
+	container := ""
+	if receiverNode != nil {
+		receiver = strings.TrimSpace(receiverNode.Content(content))
+		container = receiverTypeName(receiver)
+	}
+	if container == "" {
+		container = findContainingTypeName(fnNode, content)
 	}
 
-	walk(root, "")
-	return functions, uniqueStrings(types), namespace
-}
-
-// C# parser helpers
-func findCSharpFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string, string) {
-	var functions []FunctionNode
-	var types []string
-	namespace := parseCSharpNamespace(string(content))
-
-	var walk func(n *sitter.Node, currentType string)
-	walk = func(n *sitter.Node, currentType string) {
-		if n == nil {
-			return
-		}
-		if n.Type() == "class_declaration" || n.Type() == "interface_declaration" || n.Type() == "struct_declaration" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				currentType = nameNode.Content(content)
-				types = append(types, currentType)
-			}
-		}
-		if n.Type() == "method_declaration" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				name := nameNode.Content(content)
-				start := int(n.StartPoint().Row) + 1
-				end := int(n.EndPoint().Row) + 1
-				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentType, Namespace: namespace})
-			}
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), currentType)
-		}
+	return &FunctionNode{
+		Name:      strings.TrimSpace(nameNode.Content(content)),
+		Signature: string(content[fnNode.StartByte():fnNode.EndByte()]),
+		StartLine: int(fnNode.StartPoint().Row) + 1,
+		EndLine:   int(fnNode.EndPoint().Row) + 1,
+		Receiver:  receiver,
+		Container: container,
+		Namespace: namespace,
 	}
-
-	walk(root, "")
-	return functions, uniqueStrings(types), namespace
-}
-
-// Python parser helpers
-func findPythonFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
-	var functions []FunctionNode
-	var types []string
-
-	var walk func(n *sitter.Node, currentClass string)
-	walk = func(n *sitter.Node, currentClass string) {
-		if n == nil {
-			return
-		}
-		if n.Type() == "class_definition" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				currentClass = nameNode.Content(content)
-				types = append(types, currentClass)
-			}
-		}
-		if n.Type() == "function_definition" {
-			nameNode := n.ChildByFieldName("name")
-			if nameNode != nil {
-				name := nameNode.Content(content)
-				start := int(n.StartPoint().Row) + 1
-				end := int(n.EndPoint().Row) + 1
-				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass})
-			}
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), currentClass)
-		}
-	}
-
-	walk(root, "")
-	return functions, uniqueStrings(types)
 }
 
 func parseGoPackage(content string) string {
@@ -438,6 +399,155 @@ func uniqueStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func acquireParser(info languageInfo) *sitter.Parser {
+	poolAny, _ := parserPools.LoadOrStore(info.key, &sync.Pool{
+		New: func() interface{} {
+			parser := sitter.NewParser()
+			parser.SetLanguage(info.lang)
+			return parser
+		},
+	})
+	parser := poolAny.(*sync.Pool).Get().(*sitter.Parser)
+	parser.SetLanguage(info.lang)
+	return parser
+}
+
+func releaseParser(info languageInfo, parser *sitter.Parser) {
+	if parser == nil {
+		return
+	}
+	if poolAny, ok := parserPools.Load(info.key); ok {
+		poolAny.(*sync.Pool).Put(parser)
+		return
+	}
+	parser.Close()
+}
+
+func extractMetadataWithQueries(info languageInfo, root *sitter.Node, content []byte) queryMetadata {
+	specs := metadataQuerySpecs[info.key]
+	if len(specs) == 0 || root == nil || info.lang == nil {
+		return queryMetadata{}
+	}
+
+	meta := queryMetadata{}
+	for _, spec := range specs {
+		query, err := loadQuery(info, spec)
+		if err != nil || query == nil {
+			continue
+		}
+
+		cursor := sitter.NewQueryCursor()
+		cursor.Exec(query, root)
+		for {
+			match, ok := cursor.NextMatch()
+			if !ok {
+				break
+			}
+			for _, capture := range match.Captures {
+				captureName := query.CaptureNameForId(capture.Index)
+				captureText := strings.TrimSpace(capture.Node.Content(content))
+				if captureText == "" {
+					continue
+				}
+
+				switch captureName {
+				case "namespace":
+					meta.Namespace = firstNonEmptyString(meta.Namespace, normalizeCapturedLiteral(captureText))
+				case "type.name":
+					meta.Types = append(meta.Types, normalizeCapturedLiteral(captureText))
+				case "import.path":
+					meta.Imports = append(meta.Imports, ImportRef{RawPath: normalizeCapturedLiteral(captureText)})
+				}
+			}
+		}
+		cursor.Close()
+	}
+
+	meta.Types = uniqueStrings(meta.Types)
+	meta.Imports = uniqueImportRefs(meta.Imports)
+	return meta
+}
+
+func loadQuery(info languageInfo, spec queryPatternSpec) (*sitter.Query, error) {
+	cacheKey := info.key + ":" + spec.name
+	if cached, ok := queryCache.Load(cacheKey); ok {
+		return cached.(*sitter.Query), nil
+	}
+	if _, failed := queryErrorCache.Load(cacheKey); failed {
+		return nil, fmt.Errorf("query previously failed to compile")
+	}
+
+	query, err := sitter.NewQuery([]byte(spec.pattern), info.lang)
+	if err != nil {
+		queryErrorCache.Store(cacheKey, struct{}{})
+		return nil, err
+	}
+	queryCache.Store(cacheKey, query)
+	return query, nil
+}
+
+func normalizeCapturedLiteral(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "\"`'")
+	return strings.TrimSpace(raw)
+}
+
+func mergeImportRefs(primary, fallback []ImportRef) []ImportRef {
+	return uniqueImportRefs(append(primary, fallback...))
+}
+
+func chooseImportFallback(primary, fallback []ImportRef) []ImportRef {
+	if len(primary) > 0 {
+		return uniqueImportRefs(primary)
+	}
+	return uniqueImportRefs(fallback)
+}
+
+func uniqueImportRefs(values []ImportRef) []ImportRef {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]ImportRef, 0, len(values))
+	for _, value := range values {
+		key := strings.TrimSpace(value.RawPath) + "|" + strings.TrimSpace(value.Alias)
+		if key == "|" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func findContainingTypeName(node *sitter.Node, content []byte) string {
+	for current := node.Parent(); current != nil; current = current.Parent() {
+		switch current.Type() {
+		case "class_declaration", "interface_declaration", "struct_declaration", "class_definition", "class", "type_spec":
+			nameNode := current.ChildByFieldName("name")
+			if nameNode != nil {
+				name := strings.TrimSpace(nameNode.Content(content))
+				if name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func parseGoImports(content string) []ImportRef {
