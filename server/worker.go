@@ -433,6 +433,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	if os.IsNotExist(err) {
 		log.Printf("File removed on dev machine, purging remote vectors: %s", path)
 		_ = iw.purgeFileVectors(ctx, path)
+		ast.EvictTree(path)
 		return
 	} else if err != nil {
 		return
@@ -1251,7 +1252,11 @@ func splitCamelCase(s string) []string {
 }
 
 func classifyRoleTags(input string) []string {
-	lower := strings.ToLower(input)
+	tokens := tokenizeForTags(input)
+	tokenSet := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		tokenSet[t] = struct{}{}
+	}
 	roleMatchers := map[string][]string{
 		"test":           {"test", "tests", "spec", "fixture", "mock"},
 		"service":        {"service", "services"},
@@ -1276,7 +1281,7 @@ func classifyRoleTags(input string) []string {
 	var tags []string
 	for tag, patterns := range roleMatchers {
 		for _, pattern := range patterns {
-			if strings.Contains(lower, pattern) {
+			if _, ok := tokenSet[pattern]; ok {
 				tags = append(tags, tag)
 				break
 			}

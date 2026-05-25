@@ -64,6 +64,7 @@ type queryPatternSpec struct {
 var parserPools sync.Map
 var queryCache sync.Map
 var queryErrorCache sync.Map
+var treeCache sync.Map
 
 var metadataQuerySpecs = map[string][]queryPatternSpec{
 	"go": {
@@ -78,13 +79,19 @@ var metadataQuerySpecs = map[string][]queryPatternSpec{
 	},
 	"typescript": {
 		{name: "type", pattern: `(class_declaration name: (identifier) @type.name)`},
+		{name: "type_interface", pattern: `(interface_declaration name: (type_identifier) @type.name)`},
+		{name: "type_alias", pattern: `(type_alias_declaration name: (type_identifier) @type.name)`},
+		{name: "type_enum", pattern: `(enum_declaration name: (identifier) @type.name)`},
 		{name: "import", pattern: `(import_statement source: (string (string_fragment) @import.path))`},
 	},
 	"csharp": {
 		{name: "namespace", pattern: `(namespace_declaration name: (_) @namespace)`},
+		{name: "namespace_file", pattern: `(file_scoped_namespace_declaration name: (_) @namespace)`},
 		{name: "type_class", pattern: `(class_declaration name: (identifier) @type.name)`},
 		{name: "type_interface", pattern: `(interface_declaration name: (identifier) @type.name)`},
 		{name: "type_struct", pattern: `(struct_declaration name: (identifier) @type.name)`},
+		{name: "type_record", pattern: `(record_declaration name: (identifier) @type.name)`},
+		{name: "type_enum", pattern: `(enum_declaration name: (identifier) @type.name)`},
 		{name: "import", pattern: `(using_directive name: (_) @import.path)`},
 	},
 	"python": {
@@ -95,6 +102,8 @@ var metadataQuerySpecs = map[string][]queryPatternSpec{
 	"php": {
 		{name: "namespace", pattern: `(namespace_definition name: (_) @namespace)`},
 		{name: "type", pattern: `(class_declaration name: (name) @type.name)`},
+		{name: "type_interface", pattern: `(interface_declaration name: (name) @type.name)`},
+		{name: "type_trait", pattern: `(trait_declaration name: (name) @type.name)`},
 		{name: "import", pattern: `(namespace_use_declaration (namespace_use_clause name: (_) @import.path))`},
 	},
 }
@@ -107,10 +116,12 @@ var functionQuerySpecs = map[string][]queryPatternSpec{
 	"javascript": {
 		{name: "function", pattern: `(function_declaration name: (identifier) @func.name) @func.node`},
 		{name: "method", pattern: `(method_definition name: (property_identifier) @func.name) @func.node`},
+		{name: "arrow", pattern: `(lexical_declaration (variable_declarator name: (identifier) @func.name value: (arrow_function))) @func.node`},
 	},
 	"typescript": {
 		{name: "function", pattern: `(function_declaration name: (identifier) @func.name) @func.node`},
 		{name: "method", pattern: `(method_definition name: (property_identifier) @func.name) @func.node`},
+		{name: "arrow", pattern: `(lexical_declaration (variable_declarator name: (identifier) @func.name value: (arrow_function))) @func.node`},
 	},
 	"php": {
 		{name: "function", pattern: `(function_definition name: (name) @func.name) @func.node`},
@@ -191,8 +202,13 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 		parser := acquireParser(info)
 		defer releaseParser(info, parser)
 
-		tree, err := parser.ParseCtx(ctx, nil, fileContent)
+		var oldTree *sitter.Tree
+		if cached, ok := treeCache.Load(filePath); ok {
+			oldTree = cached.(*sitter.Tree)
+		}
+		tree, err := parser.ParseCtx(ctx, oldTree, fileContent)
 		if tree != nil {
+			treeCache.Store(filePath, tree)
 			queryMeta := extractMetadataWithQueries(info, tree.RootNode(), fileContent)
 			functions = extractFunctionsWithQueries(info, tree.RootNode(), fileContent, queryMeta.Namespace)
 			switch info.key {
@@ -423,6 +439,11 @@ func releaseParser(info languageInfo, parser *sitter.Parser) {
 		return
 	}
 	parser.Close()
+}
+
+// EvictTree removes the cached parse tree for a file, freeing memory when a file is deleted.
+func EvictTree(filePath string) {
+	treeCache.Delete(filePath)
 }
 
 func extractMetadataWithQueries(info languageInfo, root *sitter.Node, content []byte) queryMetadata {
