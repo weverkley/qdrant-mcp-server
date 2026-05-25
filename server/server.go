@@ -66,23 +66,8 @@ func Start(version string) {
 			}
 			return
 		case "ingest", "-ingest", "--ingest":
-			cfg := LoadConfig()
-			if cfg.CollectionName == "" || cfg.WatchDirectory == "" || cfg.OllamaHost == "" {
-				log.Fatal("Fatal: Missing required environment variables (QDRANT_COLLECTION, WATCH_DIRECTORY, OLLAMA_HOST)")
-			}
-			client, err := qdrant.NewClient(&qdrant.Config{
-				Host:                   cfg.QdrantHost,
-				Port:                   cfg.QdrantPort,
-				SkipCompatibilityCheck: true,
-			})
-			if err != nil {
-				log.Fatalf("Failed to establish Qdrant connection: %v", err)
-			}
+			cfg, client, worker := mustCreateWorker()
 			defer client.Close()
-
-			gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
-
-			worker := NewIngestionWorker(cfg, client, gitIgnore)
 			defer worker.Close()
 
 			log.Println("Starting manual codebase ingestion...")
@@ -91,6 +76,49 @@ func Start(version string) {
 				log.Fatalf("Error during manual ingestion: %v", err)
 			}
 			fmt.Printf("🎉 Success! Ingested %d files into collection '%s'.\n", count, cfg.CollectionName)
+			return
+		case "search", "-search", "--search":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Error: missing query.")
+				fmt.Fprintln(os.Stderr, "Usage: qdrant-mcp-server search <query>")
+				os.Exit(1)
+			}
+			_, client, worker := mustCreateWorker()
+			defer client.Close()
+			defer worker.Close()
+
+			query := strings.Join(os.Args[2:], " ")
+			results, err := worker.ExecuteVectorSearch(context.Background(), query, nil, "")
+			if err != nil {
+				log.Fatalf("Search failed: %v", err)
+			}
+			fmt.Println(results)
+			return
+		case "evaluate-search", "eval-search", "eval":
+			cfg, client, worker := mustCreateWorker()
+			defer client.Close()
+			defer worker.Close()
+
+			log.Printf("Running self-evaluation against workspace %s", cfg.WatchDirectory)
+			if _, err := worker.SyncWorkspace(context.Background()); err != nil {
+				log.Fatalf("Self-ingestion failed before evaluation: %v", err)
+			}
+
+			suites := defaultEvaluationQueries(cfg.WatchDirectory)
+			passed := 0
+			for _, suite := range suites {
+				result, err := worker.ExecuteVectorSearch(context.Background(), suite.Query, suite.FileExtensions, suite.PathPrefix)
+				if err != nil {
+					log.Printf("Evaluation query failed for %q: %v", suite.Query, err)
+					continue
+				}
+				ok := strings.Contains(strings.ToLower(result), strings.ToLower(suite.ExpectContains))
+				if ok {
+					passed++
+				}
+				fmt.Printf("\n=== Query: %s ===\nExpected: %s\nPass: %t\n\n%s\n", suite.Query, suite.ExpectContains, ok, result)
+			}
+			fmt.Printf("\nEvaluation summary: %d/%d queries matched expected fragments.\n", passed, len(suites))
 			return
 		case "help", "-h", "--help":
 			printCLIHelp()
@@ -154,6 +182,43 @@ func Start(version string) {
 
 func cancelHandle(c context.CancelFunc) { c() }
 
+type EvaluationQuery struct {
+	Query          string
+	ExpectContains string
+	FileExtensions []string
+	PathPrefix     string
+}
+
+func mustCreateWorker() (Config, *qdrant.Client, *IngestionWorker) {
+	cfg := LoadConfig()
+	if cfg.CollectionName == "" || cfg.WatchDirectory == "" || cfg.OllamaHost == "" {
+		log.Fatal("Fatal: Missing required environment variables (QDRANT_COLLECTION, WATCH_DIRECTORY, OLLAMA_HOST)")
+	}
+
+	client, err := qdrant.NewClient(&qdrant.Config{
+		Host:                   cfg.QdrantHost,
+		Port:                   cfg.QdrantPort,
+		SkipCompatibilityCheck: true,
+	})
+	if err != nil {
+		log.Fatalf("Failed to establish Qdrant connection: %v", err)
+	}
+
+	gitIgnore := NewGitIgnoreMatcher(cfg.WatchDirectory)
+	worker := NewIngestionWorker(cfg, client, gitIgnore)
+	return cfg, client, worker
+}
+
+func defaultEvaluationQueries(watchDir string) []EvaluationQuery {
+	return []EvaluationQuery{
+		{Query: "recursive watcher for newly created directories", ExpectContains: "server/watcher.go", FileExtensions: []string{"go"}, PathPrefix: "server"},
+		{Query: "vector search execution and reranking", ExpectContains: "server/worker.go", FileExtensions: []string{"go"}, PathPrefix: "server"},
+		{Query: "auto discover mcp and codex config", ExpectContains: "server/config.go", FileExtensions: []string{"go"}, PathPrefix: "server"},
+		{Query: "tree sitter parse code metadata and imports", ExpectContains: "ast/ast.go", FileExtensions: []string{"go"}, PathPrefix: "ast"},
+		{Query: "worker tags and search tests", ExpectContains: "tests/worker_test.go", FileExtensions: []string{"go"}, PathPrefix: "tests"},
+	}
+}
+
 func printCLIHelp() {
 	fmt.Println("\n==================================================================")
 	fmt.Println("🤖 Go Qdrant-RAG MCP Server CLI")
@@ -164,6 +229,8 @@ func printCLIHelp() {
 	fmt.Println("\x1b[1;33mCommands:\x1b[0m")
 	fmt.Println("  (no arguments)                 Starts the active MCP server.")
 	fmt.Println("  ingest                         Recursively crawl and ingest the workspace into Qdrant immediately.")
+	fmt.Println("  search <query>                 Execute a direct semantic search from the CLI.")
+	fmt.Println("  evaluate-search                Ingest the workspace and run canned search quality checks.")
 	fmt.Println("  list-skills                    List all available AI agent skills.")
 	fmt.Println("  install-skill <agent> [dir]    Installs the rules file for the specified agent.")
 	fmt.Println("                                 Options: cursor, windsurf, cline, copilot, generic, codex, all.")

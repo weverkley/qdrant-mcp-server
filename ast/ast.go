@@ -76,6 +76,8 @@ type FunctionNode struct {
 	EndLine   int       `json:"end_line"`
 	Language  string    `json:"language,omitempty"`
 	Receiver  string    `json:"receiver,omitempty"`
+	Container string    `json:"container,omitempty"`
+	Namespace string    `json:"namespace,omitempty"`
 	Calls     []CallRef `json:"calls,omitempty"`
 }
 
@@ -96,6 +98,8 @@ type CallRef struct {
 type CodeParseResult struct {
 	Functions []FunctionNode
 	Imports   []ImportRef
+	Namespace string
+	Types     []string
 }
 
 // ParseCodeToDocsWithMeta extracts FunctionNodes and file metadata (imports, calls) from code content.
@@ -105,6 +109,8 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 	info := languageForExt(ext)
 	var functions []FunctionNode
 	var imports []ImportRef
+	var namespace string
+	var types []string
 
 	if info.lang != nil {
 		parser := sitter.NewParser()
@@ -114,22 +120,23 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 		if tree != nil {
 			switch info.key {
 			case "go":
-				functions = findGoFunctions(tree.RootNode(), fileContent)
+				functions, types = findGoFunctions(tree.RootNode(), fileContent)
 				imports = parseGoImports(string(fileContent))
+				namespace = parseGoPackage(string(fileContent))
 			case "javascript":
-				functions = findJSFunctions(tree.RootNode(), fileContent)
+				functions, types = findJSFunctions(tree.RootNode(), fileContent)
 				imports = parseJSImports(string(fileContent))
 			case "typescript":
-				functions = findTSFunctions(tree.RootNode(), fileContent)
+				functions, types = findTSFunctions(tree.RootNode(), fileContent)
 				imports = parseTSImports(string(fileContent))
 			case "php":
-				functions = findPHPFunctions(tree.RootNode(), fileContent)
+				functions, types, namespace = findPHPFunctions(tree.RootNode(), fileContent)
 				imports = parsePHPImports(string(fileContent))
 			case "csharp":
-				functions = findCSharpFunctions(tree.RootNode(), fileContent)
+				functions, types, namespace = findCSharpFunctions(tree.RootNode(), fileContent)
 				imports = parseCSharpImports(string(fileContent))
 			case "python":
-				functions = findPythonFunctions(tree.RootNode(), fileContent)
+				functions, types = findPythonFunctions(tree.RootNode(), fileContent)
 				imports = parsePythonImports(string(fileContent))
 			}
 		}
@@ -142,9 +149,12 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 
 	for i := range functions {
 		functions[i].Language = langLabel
+		if functions[i].Namespace == "" {
+			functions[i].Namespace = namespace
+		}
 	}
 
-	return CodeParseResult{Functions: functions, Imports: imports}, nil
+	return CodeParseResult{Functions: functions, Imports: imports, Namespace: namespace, Types: uniqueStrings(types)}, nil
 }
 
 // ParseCodeToDocs extracts FunctionNodes from code content.
@@ -170,9 +180,9 @@ func genericFunctionNodes(filePath string, fileContent []byte) []FunctionNode {
 }
 
 // Go parser helpers
-func findGoFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findGoFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
 	var functions []FunctionNode
-	var currentReceiver string
+	var types []string
 
 	var walk func(n *sitter.Node)
 	walk = func(n *sitter.Node) {
@@ -187,11 +197,12 @@ func findGoFunctions(root *sitter.Node, content []byte) []FunctionNode {
 				end := int(n.EndPoint().Row) + 1
 				sig := string(content[n.StartByte():n.EndByte()])
 				recv := ""
+				container := ""
 				if n.Type() == "method_declaration" {
 					recvNode := n.ChildByFieldName("receiver")
 					if recvNode != nil {
 						recv = recvNode.Content(content)
-						currentReceiver = recv
+						container = receiverTypeName(recv)
 					}
 				}
 				functions = append(functions, FunctionNode{
@@ -200,13 +211,14 @@ func findGoFunctions(root *sitter.Node, content []byte) []FunctionNode {
 					StartLine: start,
 					EndLine:   end,
 					Receiver:  recv,
+					Container: container,
 				})
 			}
 		}
 		if n.Type() == "type_spec" {
 			nameNode := n.ChildByFieldName("name")
 			if nameNode != nil {
-				currentReceiver = nameNode.Content(content)
+				types = append(types, nameNode.Content(content))
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
@@ -215,18 +227,25 @@ func findGoFunctions(root *sitter.Node, content []byte) []FunctionNode {
 	}
 
 	walk(root)
-	_ = currentReceiver
-	return functions
+	return functions, uniqueStrings(types)
 }
 
 // JavaScript parser helpers
-func findJSFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findJSFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
 	var functions []FunctionNode
+	var types []string
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *sitter.Node, currentClass string)
+	walk = func(n *sitter.Node, currentClass string) {
 		if n == nil {
 			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "class" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode != nil {
+				currentClass = nameNode.Content(content)
+				types = append(types, currentClass)
+			}
 		}
 		if n.Type() == "function_declaration" || n.Type() == "method_definition" {
 			nameNode := n.ChildByFieldName("name")
@@ -235,31 +254,40 @@ func findJSFunctions(root *sitter.Node, content []byte) []FunctionNode {
 				start := int(n.StartPoint().Row) + 1
 				end := int(n.EndPoint().Row) + 1
 				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end})
+				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass})
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+			walk(n.Child(i), currentClass)
 		}
 	}
 
-	walk(root)
-	return functions
+	walk(root, "")
+	return functions, uniqueStrings(types)
 }
 
 // TypeScript parser helpers
-func findTSFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findTSFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
 	return findJSFunctions(root, content)
 }
 
 // PHP parser helpers
-func findPHPFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findPHPFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string, string) {
 	var functions []FunctionNode
+	var types []string
+	namespace := parsePHPNamespace(string(content))
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *sitter.Node, currentClass string)
+	walk = func(n *sitter.Node, currentClass string) {
 		if n == nil {
 			return
+		}
+		if n.Type() == "class_declaration" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode != nil {
+				currentClass = nameNode.Content(content)
+				types = append(types, currentClass)
+			}
 		}
 		if n.Type() == "function_definition" || n.Type() == "method_declaration" {
 			nameNode := n.ChildByFieldName("name")
@@ -268,26 +296,35 @@ func findPHPFunctions(root *sitter.Node, content []byte) []FunctionNode {
 				start := int(n.StartPoint().Row) + 1
 				end := int(n.EndPoint().Row) + 1
 				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end})
+				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass, Namespace: namespace})
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+			walk(n.Child(i), currentClass)
 		}
 	}
 
-	walk(root)
-	return functions
+	walk(root, "")
+	return functions, uniqueStrings(types), namespace
 }
 
 // C# parser helpers
-func findCSharpFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findCSharpFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string, string) {
 	var functions []FunctionNode
+	var types []string
+	namespace := parseCSharpNamespace(string(content))
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *sitter.Node, currentType string)
+	walk = func(n *sitter.Node, currentType string) {
 		if n == nil {
 			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "interface_declaration" || n.Type() == "struct_declaration" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode != nil {
+				currentType = nameNode.Content(content)
+				types = append(types, currentType)
+			}
 		}
 		if n.Type() == "method_declaration" {
 			nameNode := n.ChildByFieldName("name")
@@ -296,26 +333,34 @@ func findCSharpFunctions(root *sitter.Node, content []byte) []FunctionNode {
 				start := int(n.StartPoint().Row) + 1
 				end := int(n.EndPoint().Row) + 1
 				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end})
+				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentType, Namespace: namespace})
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+			walk(n.Child(i), currentType)
 		}
 	}
 
-	walk(root)
-	return functions
+	walk(root, "")
+	return functions, uniqueStrings(types), namespace
 }
 
 // Python parser helpers
-func findPythonFunctions(root *sitter.Node, content []byte) []FunctionNode {
+func findPythonFunctions(root *sitter.Node, content []byte) ([]FunctionNode, []string) {
 	var functions []FunctionNode
+	var types []string
 
-	var walk func(n *sitter.Node)
-	walk = func(n *sitter.Node) {
+	var walk func(n *sitter.Node, currentClass string)
+	walk = func(n *sitter.Node, currentClass string) {
 		if n == nil {
 			return
+		}
+		if n.Type() == "class_definition" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode != nil {
+				currentClass = nameNode.Content(content)
+				types = append(types, currentClass)
+			}
 		}
 		if n.Type() == "function_definition" {
 			nameNode := n.ChildByFieldName("name")
@@ -324,16 +369,75 @@ func findPythonFunctions(root *sitter.Node, content []byte) []FunctionNode {
 				start := int(n.StartPoint().Row) + 1
 				end := int(n.EndPoint().Row) + 1
 				sig := string(content[n.StartByte():n.EndByte()])
-				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end})
+				functions = append(functions, FunctionNode{Name: name, Signature: sig, StartLine: start, EndLine: end, Container: currentClass})
 			}
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i))
+			walk(n.Child(i), currentClass)
 		}
 	}
 
-	walk(root)
-	return functions
+	walk(root, "")
+	return functions, uniqueStrings(types)
+}
+
+func parseGoPackage(content string) string {
+	re := regexp.MustCompile(`(?m)^\s*package\s+([A-Za-z0-9_]+)`)
+	match := re.FindStringSubmatch(content)
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func parseCSharpNamespace(content string) string {
+	re := regexp.MustCompile(`(?m)^\s*namespace\s+([A-Za-z0-9_.]+)`)
+	match := re.FindStringSubmatch(content)
+	if len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func parsePHPNamespace(content string) string {
+	re := regexp.MustCompile(`(?m)^\s*namespace\s+([^;{]+)`)
+	match := re.FindStringSubmatch(content)
+	if len(match) > 1 {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func receiverTypeName(receiver string) string {
+	replacer := strings.NewReplacer("(", " ", ")", " ", "*", " ", "[", " ", "]", " ", "{", " ", "}", " ")
+	parts := strings.Fields(replacer.Replace(receiver))
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part != "" {
+			return part
+		}
+	}
+	return ""
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func parseGoImports(content string) []ImportRef {

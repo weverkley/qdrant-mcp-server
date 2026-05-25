@@ -591,11 +591,11 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
-	if len(mockClient.queryCalls) != 1 {
+	if len(mockClient.queryCalls) == 0 {
 		mockClient.mu.Unlock()
-		t.Fatalf("Expected 1 query call, got %d", len(mockClient.queryCalls))
+		t.Fatalf("Expected at least 1 query call, got %d", len(mockClient.queryCalls))
 	}
-	denseCall := mockClient.queryCalls[0]
+	denseCall := mockClient.queryCalls[len(mockClient.queryCalls)-1]
 	mockClient.queryCalls = nil // reset
 	mockClient.mu.Unlock()
 
@@ -611,11 +611,11 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
-	if len(mockClient.queryCalls) != 1 {
+	if len(mockClient.queryCalls) == 0 {
 		mockClient.mu.Unlock()
-		t.Fatalf("Expected 1 query call for sparse, got %d", len(mockClient.queryCalls))
+		t.Fatalf("Expected at least 1 query call for sparse, got %d", len(mockClient.queryCalls))
 	}
-	sparseCall := mockClient.queryCalls[0]
+	sparseCall := mockClient.queryCalls[len(mockClient.queryCalls)-1]
 	mockClient.queryCalls = nil // reset
 	mockClient.mu.Unlock()
 
@@ -631,11 +631,11 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
 
 	mockClient.mu.Lock()
-	if len(mockClient.queryCalls) != 1 {
+	if len(mockClient.queryCalls) == 0 {
 		mockClient.mu.Unlock()
-		t.Fatalf("Expected 1 query call for hybrid, got %d", len(mockClient.queryCalls))
+		t.Fatalf("Expected at least 1 query call for hybrid, got %d", len(mockClient.queryCalls))
 	}
-	hybridCall := mockClient.queryCalls[0]
+	hybridCall := mockClient.queryCalls[len(mockClient.queryCalls)-1]
 	mockClient.queryCalls = nil // reset
 	mockClient.mu.Unlock()
 

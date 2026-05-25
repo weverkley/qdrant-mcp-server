@@ -492,7 +492,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	extClean := strings.TrimPrefix(ext, ".")
 	relPath, _ := filepath.Rel(iw.Cfg.WatchDirectory, path)
 	relDirs := convertStringSlice(getParentDirs(relPath))
-	fileTags := buildFileTags(path, relPath, extClean)
+	modifiedUnix := info.ModTime().Unix()
 	var points []*qdrant.PointStruct
 
 	// Determine file categories based on ParserMode
@@ -513,6 +513,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	var imports []ast.ImportRef
 	var docChunks []ast.ChunkNode
 	var isDocParsed = false
+	var namespace string
+	var typeNames []string
 
 	if isSupportedCode {
 		parseResult, err := ast.ParseCodeToDocsWithMeta(ctx, path, content)
@@ -521,6 +523,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		} else {
 			functions = parseResult.Functions
 			imports = parseResult.Imports
+			namespace = parseResult.Namespace
+			typeNames = parseResult.Types
 		}
 	} else if isSupportedDoc {
 		_, chunks, err := ast.ParseTextToChunks(path)
@@ -531,6 +535,13 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			log.Printf("Document parsing failed for %s: %v, falling back to simple chunking", path, err)
 		}
 	}
+
+	fileTags := buildFileTags(path, relPath, extClean)
+	frameworkTags := inferImportTags(detectLanguage(path), imports)
+	layerTags := collectLayerTags(relPath, namespace, typeNames)
+	symbolNames := buildFileSymbolNames(path, relPath, namespace, typeNames)
+	isTestFile := hasTag(fileTags, "test") || hasTag(layerTags, "test")
+	testFramework := detectTestFramework(frameworkTags)
 
 	if len(functions) > 0 {
 		for idx, fn := range functions {
@@ -557,27 +568,36 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				hash := sha1.Sum([]byte(deterministicSeed))
 				id, _ := uuid.FromBytes(hash[:16])
 
-				pointTags := mergeTags(fileTags, buildFunctionTags(fn, imports))
+				pointTags := mergeTags(fileTags, frameworkTags, layerTags, buildFunctionTags(fn, imports))
+				pointSymbols := mergeTags(symbolNames, buildFunctionSymbolNames(fn))
 				payload := map[string]interface{}{
-					"file_path":     path,
-					"content":       chunk,
-					"type":          "function",
-					"name":          fn.Name,
-					"start_line":    int64(fn.StartLine),
-					"end_line":      int64(fn.EndLine),
-					"language":      fn.Language,
-					"extension":     extClean,
-					"relative_path": relPath,
-					"relative_dirs": relDirs,
-					"tags":          convertStringSlice(pointTags),
-					"file_hash":     localHash,
-					"updated":       time.Now().Unix(),
+					"file_path":      path,
+					"content":        chunk,
+					"type":           "function",
+					"name":           fn.Name,
+					"start_line":     int64(fn.StartLine),
+					"end_line":       int64(fn.EndLine),
+					"language":       fn.Language,
+					"extension":      extClean,
+					"relative_path":  relPath,
+					"relative_dirs":  relDirs,
+					"namespace":      firstNonEmpty(fn.Namespace, namespace),
+					"container":      fn.Container,
+					"symbol_names":   convertStringSlice(pointSymbols),
+					"framework_tags": convertStringSlice(frameworkTags),
+					"layer_tags":     convertStringSlice(layerTags),
+					"tags":           convertStringSlice(pointTags),
+					"is_test":        isTestFile,
+					"test_framework": testFramework,
+					"file_hash":      localHash,
+					"modified":       modifiedUnix,
+					"updated":        time.Now().Unix(),
 				}
 				if fn.Receiver != "" {
 					payload["receiver"] = fn.Receiver
 				}
 
-				searchText := buildSearchText(chunk, pointTags)
+				searchText := buildSearchText(chunk, pointTags, pointSymbols, firstNonEmpty(fn.Namespace, namespace), fn.Container, relPath)
 				sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 				points = append(points, &qdrant.PointStruct{
@@ -603,24 +623,31 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
-			pointTags := mergeTags(fileTags, []string{"document"})
+			pointTags := mergeTags(fileTags, layerTags, []string{"document"})
 			payload := map[string]interface{}{
-				"file_path":     path,
-				"content":       chunk.Content,
-				"type":          "doc_chunk",
-				"hash":          chunk.Hash,
-				"extension":     extClean,
-				"relative_path": relPath,
-				"relative_dirs": relDirs,
-				"tags":          convertStringSlice(pointTags),
-				"file_hash":     localHash,
-				"updated":       time.Now().Unix(),
+				"file_path":      path,
+				"content":        chunk.Content,
+				"type":           "doc_chunk",
+				"hash":           chunk.Hash,
+				"extension":      extClean,
+				"relative_path":  relPath,
+				"relative_dirs":  relDirs,
+				"namespace":      namespace,
+				"symbol_names":   convertStringSlice(symbolNames),
+				"framework_tags": convertStringSlice(frameworkTags),
+				"layer_tags":     convertStringSlice(layerTags),
+				"tags":           convertStringSlice(pointTags),
+				"is_test":        isTestFile,
+				"test_framework": testFramework,
+				"file_hash":      localHash,
+				"modified":       modifiedUnix,
+				"updated":        time.Now().Unix(),
 			}
 			if chunk.PageNumber > 0 {
 				payload["page_number"] = int64(chunk.PageNumber)
 			}
 
-			searchText := buildSearchText(chunk.Content, pointTags)
+			searchText := buildSearchText(chunk.Content, pointTags, symbolNames, namespace, "", relPath)
 			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
@@ -647,20 +674,27 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
-			pointTags := mergeTags(fileTags, []string{"file_chunk"})
+			pointTags := mergeTags(fileTags, frameworkTags, layerTags, []string{"file_chunk"})
 			payload := map[string]interface{}{
-				"file_path":     path,
-				"content":       chunk,
-				"type":          "chunk",
-				"extension":     extClean,
-				"relative_path": relPath,
-				"relative_dirs": relDirs,
-				"tags":          convertStringSlice(pointTags),
-				"file_hash":     localHash,
-				"updated":       time.Now().Unix(),
+				"file_path":      path,
+				"content":        chunk,
+				"type":           "chunk",
+				"extension":      extClean,
+				"relative_path":  relPath,
+				"relative_dirs":  relDirs,
+				"namespace":      namespace,
+				"symbol_names":   convertStringSlice(symbolNames),
+				"framework_tags": convertStringSlice(frameworkTags),
+				"layer_tags":     convertStringSlice(layerTags),
+				"tags":           convertStringSlice(pointTags),
+				"is_test":        isTestFile,
+				"test_framework": testFramework,
+				"file_hash":      localHash,
+				"modified":       modifiedUnix,
+				"updated":        time.Now().Unix(),
 			}
 
-			searchText := buildSearchText(chunk, pointTags)
+			searchText := buildSearchText(chunk, pointTags, symbolNames, namespace, "", relPath)
 			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
@@ -903,62 +937,115 @@ func (iw *IngestionWorker) chunkText(text string, size int) []string {
 }
 
 func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string) (string, error) {
-	// Step A: Vectorize the search query using your home lab Ollama endpoint
-	vector, err := iw.FetchRemoteEmbedding(ctx, query)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
-	}
-	queryTags := buildQueryTags(query, fileExtensions, pathPrefix)
+	intent := detectQueryIntent(query, fileExtensions, pathPrefix)
+	qdrantFilter := buildSearchFilter(fileExtensions, pathPrefix)
+	candidateLimit := uint64(40)
+	finalLimit := 5
 
-	var filterConditions []*qdrant.Condition
-
-	// 1. File Extensions Filter (OR match across extensions)
-	if len(fileExtensions) > 0 {
-		var shouldMatch []*qdrant.Condition
-		for _, ext := range fileExtensions {
-			cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
-			shouldMatch = append(shouldMatch, qdrant.NewMatchKeyword("extension", cleanExt))
+	variantQueries := buildQueryVariants(intent, pathPrefix)
+	variantResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
+	for _, variant := range variantQueries {
+		results, err := iw.queryVariant(ctx, variant, qdrantFilter, candidateLimit)
+		if err != nil {
+			return "", fmt.Errorf("qdrant search operation failed for variant %q: %w", variant, err)
 		}
-		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{
-			Should: shouldMatch,
-		}))
+		variantResults[variant] = results
 	}
 
-	// 2. Path Prefix Filter (matches relative path or any parent dir)
-	if pathPrefix != "" {
-		cleanPrefix := filepath.ToSlash(strings.TrimPrefix(pathPrefix, "/"))
-		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{
-			Should: []*qdrant.Condition{
-				qdrant.NewMatchKeyword("relative_path", cleanPrefix),
-				qdrant.NewMatchKeyword("relative_dirs", cleanPrefix),
-			},
-		}))
+	ranked := rerankSearchResults(variantResults, intent, pathPrefix)
+	if len(ranked) == 0 {
+		return "No relevant structural code blocks or reference components were found matching your query scope.", nil
+	}
+	if len(ranked) > finalLimit {
+		ranked = ranked[:finalLimit]
 	}
 
-	var qdrantFilter *qdrant.Filter
-	if len(filterConditions) > 0 {
-		qdrantFilter = &qdrant.Filter{
-			Must: filterConditions,
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Core Codebase Reference Snippets for: \"%s\"\n\n", query))
+	sb.WriteString(fmt.Sprintf("Search intent: tags=`%s`", strings.Join(intent.Tags, "`, `")))
+	if len(intent.FrameworkTags) > 0 {
+		sb.WriteString(fmt.Sprintf(" | frameworks=`%s`", strings.Join(intent.FrameworkTags, "`, `")))
+	}
+	if len(intent.LayerTags) > 0 {
+		sb.WriteString(fmt.Sprintf(" | layers=`%s`", strings.Join(intent.LayerTags, "`, `")))
+	}
+	sb.WriteString(fmt.Sprintf(" | variants=%d\n\n", len(variantQueries)))
+
+	for i, rankedPoint := range ranked {
+		point := rankedPoint.Point
+		payloadMap := point.Payload
+		filePath := payloadString(payloadMap, "file_path", "Unknown Location")
+		contentChunk := payloadString(payloadMap, "content", "Empty Source")
+		tagList := payloadStringList(payloadMap, "tags")
+		typeStr := payloadString(payloadMap, "type", "")
+		lang := detectLanguage(filePath)
+		lastSyncedStr := "Unknown"
+		if uVal, exists := payloadMap["updated"]; exists {
+			lastSyncedStr = time.Unix(uVal.GetIntegerValue(), 0).Format("2006-01-02 15:04:05")
 		}
+
+		switch typeStr {
+		case "function":
+			nameVal := payloadString(payloadMap, "name", "")
+			startLine := payloadInt(payloadMap, "start_line")
+			endLine := payloadInt(payloadMap, "end_line")
+			receiverVal := payloadString(payloadMap, "receiver", "")
+			containerVal := payloadString(payloadMap, "container", "")
+
+			if receiverVal != "" {
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+			} else if containerVal != "" {
+				sb.WriteString(fmt.Sprintf("#### [%d] Method: `%s.%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, containerVal, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+			} else {
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+			}
+		case "doc_chunk":
+			pageVal := payloadInt(payloadMap, "page_number")
+			if pageVal > 0 {
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, rankedPoint.Score, lastSyncedStr))
+			} else {
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, rankedPoint.Score, lastSyncedStr))
+			}
+		default:
+			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, rankedPoint.Score, lastSyncedStr))
+		}
+
+		if namespace := payloadString(payloadMap, "namespace", ""); namespace != "" {
+			sb.WriteString(fmt.Sprintf("Namespace: `%s`\n", namespace))
+		}
+		if len(tagList) > 0 {
+			sb.WriteString(fmt.Sprintf("Tags: `%s`\n", strings.Join(tagList, "`, `")))
+		}
+		if len(rankedPoint.Reasons) > 0 {
+			sb.WriteString(fmt.Sprintf("Signals: `%s`\n", strings.Join(rankedPoint.Reasons, "`, `")))
+		}
+
+		sb.WriteString(fmt.Sprintf("```%s\n", lang))
+		sb.WriteString(contentChunk)
+		if !strings.HasSuffix(contentChunk, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("```\n\n")
 	}
 
-	// Step B: Direct a high-speed gRPC Query request to your Qdrant collection
-	// Retrieve top 5 closest matching context code sheets
-	var queryResponse []*qdrant.ScoredPoint
-	var queryResponseErr error
+	return sb.String(), nil
+}
 
+func (iw *IngestionWorker) queryVariant(ctx context.Context, query string, qdrantFilter *qdrant.Filter, candidateLimit uint64) ([]*qdrant.ScoredPoint, error) {
 	searchMode := strings.ToLower(strings.TrimSpace(iw.Cfg.SearchMode))
 	if searchMode == "" {
 		searchMode = "dense"
 	}
 
-	candidateLimit := uint64(20)
-	finalLimit := 5
+	vector, err := iw.FetchRemoteEmbedding(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate embedding for query %q: %w", query, err)
+	}
 
 	switch searchMode {
 	case "sparse":
 		sIndices, sValues := ComputeSparseVector(query, iw.CustomStopWords)
-		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+		return iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQuerySparse(sIndices, sValues),
 			Limit:          qdrant.PtrOf(candidateLimit),
@@ -968,7 +1055,7 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		})
 	case "hybrid":
 		sIndices, sValues := ComputeSparseVector(query, iw.CustomStopWords)
-		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+		return iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.Cfg.CollectionName,
 			Prefetch: []*qdrant.PrefetchQuery{
 				{
@@ -987,8 +1074,8 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 			Limit:       qdrant.PtrOf(candidateLimit),
 			WithPayload: qdrant.NewWithPayloadEnable(true),
 		})
-	default: // "dense" or fallback
-		queryResponse, queryResponseErr = iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
+	default:
+		return iw.QdrantClient.Query(ctx, &qdrant.QueryPoints{
 			CollectionName: iw.Cfg.CollectionName,
 			Query:          qdrant.NewQueryDense(vector),
 			Limit:          qdrant.PtrOf(candidateLimit),
@@ -996,101 +1083,6 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 			WithPayload:    qdrant.NewWithPayloadEnable(true),
 		})
 	}
-
-	if queryResponseErr != nil {
-		return "", fmt.Errorf("qdrant search operation failed: %w", queryResponseErr)
-	}
-
-	if len(queryResponse) == 0 {
-		return "No relevant structural code blocks or reference components were found matching your query scope.", nil
-	}
-	queryResponse = rerankSearchResults(queryResponse, queryTags, pathPrefix)
-	if len(queryResponse) > finalLimit {
-		queryResponse = queryResponse[:finalLimit]
-	}
-
-	// Step C: Marshal points cleanly into an aggregate Markdown context layout
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("### Core Codebase Reference Snippets for: \"%s\"\n\n", query))
-
-	for i, point := range queryResponse {
-		payloadMap := point.Payload
-		filePath := "Unknown Location"
-		contentChunk := "Empty Source"
-
-		if pathVal, exists := payloadMap["file_path"]; exists {
-			filePath = pathVal.GetStringValue()
-		}
-		if contentVal, exists := payloadMap["content"]; exists {
-			contentChunk = contentVal.GetStringValue()
-		}
-		tagList := payloadStringList(payloadMap, "tags")
-
-		// Detect if point is an AST function node
-		var typeStr string
-		if typeVal, exists := payloadMap["type"]; exists {
-			typeStr = typeVal.GetStringValue()
-		}
-
-		// Detect target language parsing extensions for beautiful Markdown injection blocks
-		lang := detectLanguage(filePath)
-
-		var lastSyncedStr string
-		if uVal, exists := payloadMap["updated"]; exists {
-			lastSyncedStr = time.Unix(uVal.GetIntegerValue(), 0).Format("2006-01-02 15:04:05")
-		} else {
-			lastSyncedStr = "Unknown"
-		}
-
-		if typeStr == "function" {
-			nameVal := ""
-			if nVal, exists := payloadMap["name"]; exists {
-				nameVal = nVal.GetStringValue()
-			}
-			startLine := int64(0)
-			if sVal, exists := payloadMap["start_line"]; exists {
-				startLine = sVal.GetIntegerValue()
-			}
-			endLine := int64(0)
-			if eVal, exists := payloadMap["end_line"]; exists {
-				endLine = eVal.GetIntegerValue()
-			}
-			receiverVal := ""
-			if rVal, exists := payloadMap["receiver"]; exists {
-				receiverVal = rVal.GetStringValue()
-			}
-
-			if receiverVal != "" {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, point.Score, lastSyncedStr))
-			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, point.Score, lastSyncedStr))
-			}
-		} else if typeStr == "doc_chunk" {
-			pageVal := int64(0)
-			if pVal, exists := payloadMap["page_number"]; exists {
-				pageVal = pVal.GetIntegerValue()
-			}
-			if pageVal > 0 {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, point.Score, lastSyncedStr))
-			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, point.Score, lastSyncedStr))
-			}
-		} else {
-			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, point.Score, lastSyncedStr))
-		}
-		if len(tagList) > 0 {
-			sb.WriteString(fmt.Sprintf("Tags: `%s`\n", strings.Join(tagList, "`, `")))
-		}
-
-		sb.WriteString(fmt.Sprintf("```%s\n", lang))
-		sb.WriteString(contentChunk)
-		if !strings.HasSuffix(contentChunk, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("```\n\n")
-	}
-
-	return sb.String(), nil
 }
 
 func detectLanguage(filePath string) string {
@@ -1120,11 +1112,41 @@ func detectLanguage(filePath string) string {
 	}
 }
 
-func buildSearchText(content string, tags []string) string {
-	if len(tags) == 0 {
-		return content
+type SearchIntent struct {
+	Query         string
+	Tags          []string
+	Symbols       []string
+	FrameworkTags []string
+	LayerTags     []string
+	PreferTests   bool
+	PreferExact   bool
+}
+
+type RankedSearchResult struct {
+	Point   *qdrant.ScoredPoint
+	Score   float32
+	Reasons []string
+}
+
+func buildSearchText(content string, tags, symbolNames []string, namespace, container, relPath string) string {
+	var sections []string
+	if len(tags) > 0 {
+		sections = append(sections, strings.Join(tags, " "))
 	}
-	return strings.Join(tags, " ") + "\n" + content
+	if len(symbolNames) > 0 {
+		sections = append(sections, strings.Join(symbolNames, " "))
+	}
+	if namespace != "" {
+		sections = append(sections, namespace)
+	}
+	if container != "" {
+		sections = append(sections, container)
+	}
+	if relPath != "" {
+		sections = append(sections, relPath)
+	}
+	sections = append(sections, content)
+	return strings.Join(sections, "\n")
 }
 
 func buildFileTags(path, relPath, ext string) []string {
@@ -1147,8 +1169,12 @@ func buildFunctionTags(fn ast.FunctionNode, imports []ast.ImportRef) []string {
 	tags = append(tags, "function", fn.Language)
 	tags = append(tags, tokenizeForTags(fn.Name)...)
 	tags = append(tags, tokenizeForTags(fn.Receiver)...)
+	tags = append(tags, tokenizeForTags(fn.Container)...)
+	tags = append(tags, tokenizeForTags(fn.Namespace)...)
 	tags = append(tags, classifyRoleTags(fn.Name)...)
 	tags = append(tags, classifyRoleTags(fn.Receiver)...)
+	tags = append(tags, classifyRoleTags(fn.Container)...)
+	tags = append(tags, classifyRoleTags(fn.Namespace)...)
 	tags = append(tags, inferImportTags(fn.Language, imports)...)
 
 	for _, imp := range imports {
@@ -1374,97 +1400,215 @@ func uniqueSortedTags(tags []string) []string {
 	return out
 }
 
-func buildQueryTags(query string, fileExtensions []string, pathPrefix string) []string {
-	var tags []string
-	tags = append(tags, tokenizeForTags(query)...)
+func detectQueryIntent(query string, fileExtensions []string, pathPrefix string) SearchIntent {
+	tags := tokenizeForTags(query)
 	tags = append(tags, classifyRoleTags(query)...)
-
+	tags = append(tags, inferFreeformFrameworkTags(query)...)
 	for _, ext := range fileExtensions {
 		cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
 		if cleanExt != "" {
 			tags = append(tags, cleanExt)
 		}
 	}
-
 	if pathPrefix != "" {
 		tags = append(tags, tokenizeForTags(pathPrefix)...)
 		tags = append(tags, classifyRoleTags(pathPrefix)...)
 	}
 
-	return uniqueSortedTags(tags)
+	symbols := extractSymbolCandidates(query)
+	frameworkTags := inferFreeformFrameworkTags(query)
+	layerTags := collectLayerTags(query, "", nil)
+
+	return SearchIntent{
+		Query:         query,
+		Tags:          uniqueSortedTags(tags),
+		Symbols:       uniqueSortedTags(symbols),
+		FrameworkTags: frameworkTags,
+		LayerTags:     layerTags,
+		PreferTests:   containsString(uniqueSortedTags(tags), "test"),
+		PreferExact:   looksLikeExactSymbolQuery(query),
+	}
 }
 
-func rerankSearchResults(points []*qdrant.ScoredPoint, queryTags []string, pathPrefix string) []*qdrant.ScoredPoint {
-	if len(points) == 0 {
-		return points
+func buildQueryVariants(intent SearchIntent, pathPrefix string) []string {
+	var variants []string
+	variants = append(variants, strings.TrimSpace(intent.Query))
+	if len(intent.Symbols) > 0 {
+		variants = append(variants, strings.Join(intent.Symbols, " "))
+	}
+	if intent.PreferTests {
+		variants = append(variants, intent.Query+" unit test")
+	}
+	if len(intent.FrameworkTags) > 0 {
+		variants = append(variants, intent.Query+" "+strings.Join(intent.FrameworkTags, " "))
+	}
+	if pathPrefix != "" {
+		variants = append(variants, intent.Query+" "+pathPrefix)
+	}
+	return uniqueNonEmptyStrings(variants)
+}
+
+func buildSearchFilter(fileExtensions []string, pathPrefix string) *qdrant.Filter {
+	var filterConditions []*qdrant.Condition
+	if len(fileExtensions) > 0 {
+		var shouldMatch []*qdrant.Condition
+		for _, ext := range fileExtensions {
+			cleanExt := strings.TrimPrefix(strings.ToLower(ext), ".")
+			shouldMatch = append(shouldMatch, qdrant.NewMatchKeyword("extension", cleanExt))
+		}
+		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{Should: shouldMatch}))
+	}
+	if pathPrefix != "" {
+		cleanPrefix := filepath.ToSlash(strings.TrimPrefix(pathPrefix, "/"))
+		filterConditions = append(filterConditions, qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Should: []*qdrant.Condition{
+				qdrant.NewMatchKeyword("relative_path", cleanPrefix),
+				qdrant.NewMatchKeyword("relative_dirs", cleanPrefix),
+			},
+		}))
+	}
+	if len(filterConditions) == 0 {
+		return nil
+	}
+	return &qdrant.Filter{Must: filterConditions}
+}
+
+func rerankSearchResults(variantResults map[string][]*qdrant.ScoredPoint, intent SearchIntent, pathPrefix string) []RankedSearchResult {
+	if len(variantResults) == 0 {
+		return nil
 	}
 
-	queryTagSet := make(map[string]struct{}, len(queryTags))
-	for _, tag := range queryTags {
+	combined := make(map[string]*RankedSearchResult)
+	maxModified := int64(0)
+	for variant, points := range variantResults {
+		for idx, point := range points {
+			key := pointIdentity(point)
+			entry, exists := combined[key]
+			if !exists {
+				entry = &RankedSearchResult{Point: point}
+				combined[key] = entry
+			}
+			entry.Score += float32(1.0 / float64(idx+10))
+			entry.Reasons = append(entry.Reasons, "variant:"+variant)
+			if point.Score > entry.Point.Score {
+				entry.Point = point
+			}
+			modified := payloadInt(point.Payload, "modified")
+			if modified > maxModified {
+				maxModified = modified
+			}
+		}
+	}
+
+	var ranked []RankedSearchResult
+	cleanPrefix := filepath.ToSlash(strings.Trim(strings.ToLower(pathPrefix), "/"))
+	queryTokens := tokenizeForTags(strings.Join(append(intent.Tags, intent.Symbols...), " "))
+	queryTagSet := make(map[string]struct{}, len(intent.Tags))
+	for _, tag := range intent.Tags {
 		queryTagSet[tag] = struct{}{}
 	}
+	frameworkSet := sliceToSet(intent.FrameworkTags)
+	layerSet := sliceToSet(intent.LayerTags)
+	symbolSet := sliceToSet(intent.Symbols)
 
-	cleanPrefix := filepath.ToSlash(strings.Trim(strings.ToLower(pathPrefix), "/"))
-	queryTokens := tokenizeForTags(strings.Join(queryTags, " "))
+	for _, entry := range combined {
+		entry.Score, entry.Reasons = boostedResultScore(entry, queryTagSet, frameworkSet, layerSet, symbolSet, queryTokens, cleanPrefix, intent, maxModified)
+		ranked = append(ranked, *entry)
+	}
 
-	sort.SliceStable(points, func(i, j int) bool {
-		leftScore := boostedResultScore(points[i], queryTagSet, queryTokens, cleanPrefix)
-		rightScore := boostedResultScore(points[j], queryTagSet, queryTokens, cleanPrefix)
-		if leftScore == rightScore {
-			return points[i].Score > points[j].Score
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].Score == ranked[j].Score {
+			return ranked[i].Point.Score > ranked[j].Point.Score
 		}
-		return leftScore > rightScore
+		return ranked[i].Score > ranked[j].Score
 	})
 
-	for _, point := range points {
-		point.Score = boostedResultScore(point, queryTagSet, queryTokens, cleanPrefix)
-	}
-
-	return points
+	return ranked
 }
 
-func boostedResultScore(point *qdrant.ScoredPoint, queryTags map[string]struct{}, queryTokens []string, pathPrefix string) float32 {
-	score := point.Score
-	payload := point.Payload
+func boostedResultScore(entry *RankedSearchResult, queryTags, frameworkSet, layerSet, symbolSet map[string]struct{}, queryTokens []string, pathPrefix string, intent SearchIntent, maxModified int64) (float32, []string) {
+	score := entry.Score
+	reasons := uniqueNonEmptyStrings(entry.Reasons)
+	payload := entry.Point.Payload
 
-	matchCount := 0
-	for _, tag := range payloadStringList(payload, "tags") {
-		if _, ok := queryTags[tag]; ok {
-			matchCount++
-		}
+	tagMatches := intersectCount(payloadStringList(payload, "tags"), queryTags)
+	if tagMatches > 0 {
+		score += float32(tagMatches) * 0.25
+		reasons = append(reasons, fmt.Sprintf("tag-match:%d", tagMatches))
 	}
-	score += float32(matchCount) * 0.25
 
-	filePath := ""
-	if pathVal, exists := payload["file_path"]; exists {
-		filePath = strings.ToLower(filepath.ToSlash(pathVal.GetStringValue()))
+	frameworkMatches := intersectCount(payloadStringList(payload, "framework_tags"), frameworkSet)
+	if frameworkMatches > 0 {
+		score += float32(frameworkMatches) * 0.45
+		reasons = append(reasons, fmt.Sprintf("framework-match:%d", frameworkMatches))
 	}
-	relPath := ""
-	if relVal, exists := payload["relative_path"]; exists {
-		relPath = strings.ToLower(filepath.ToSlash(relVal.GetStringValue()))
+
+	layerMatches := intersectCount(payloadStringList(payload, "layer_tags"), layerSet)
+	if layerMatches > 0 {
+		score += float32(layerMatches) * 0.45
+		reasons = append(reasons, fmt.Sprintf("layer-match:%d", layerMatches))
 	}
-	name := ""
-	if nameVal, exists := payload["name"]; exists {
-		name = strings.ToLower(nameVal.GetStringValue())
+
+	symbolNames := payloadStringList(payload, "symbol_names")
+	exactSymbolMatches := intersectCount(symbolNames, symbolSet)
+	if exactSymbolMatches > 0 {
+		score += float32(exactSymbolMatches) * 0.9
+		reasons = append(reasons, fmt.Sprintf("symbol-match:%d", exactSymbolMatches))
 	}
+
+	name := strings.ToLower(payloadString(payload, "name", ""))
+	container := strings.ToLower(payloadString(payload, "container", ""))
+	namespace := strings.ToLower(payloadString(payload, "namespace", ""))
+	filePath := strings.ToLower(filepath.ToSlash(payloadString(payload, "file_path", "")))
+	relPath := strings.ToLower(filepath.ToSlash(payloadString(payload, "relative_path", "")))
 
 	for _, token := range queryTokens {
 		if token == "" {
 			continue
 		}
 		if name != "" && strings.Contains(name, token) {
+			score += 0.4
+			reasons = append(reasons, "name:"+token)
+		}
+		if container != "" && strings.Contains(container, token) {
 			score += 0.35
+			reasons = append(reasons, "container:"+token)
+		}
+		if namespace != "" && strings.Contains(namespace, token) {
+			score += 0.25
+			reasons = append(reasons, "namespace:"+token)
 		}
 		if relPath != "" && strings.Contains(relPath, token) {
 			score += 0.15
+			reasons = append(reasons, "path:"+token)
 		}
+	}
+
+	if intent.PreferTests && payloadBool(payload, "is_test") {
+		score += 0.75
+		reasons = append(reasons, "intent:test")
 	}
 
 	if pathPrefix != "" && (strings.Contains(relPath, pathPrefix) || strings.Contains(filePath, pathPrefix)) {
 		score += 0.5
+		reasons = append(reasons, "path-prefix")
 	}
 
-	return score
+	if maxModified > 0 {
+		modified := payloadInt(payload, "modified")
+		if modified > 0 {
+			recencyBoost := float32(modified) / float32(maxModified)
+			score += recencyBoost * 0.15
+			reasons = append(reasons, "freshness")
+		}
+	}
+
+	if intent.PreferExact && exactSymbolMatches > 0 {
+		score += 0.75
+		reasons = append(reasons, "intent:exact")
+	}
+
+	return score, uniqueNonEmptyStrings(reasons)
 }
 
 func payloadStringList(payload map[string]*qdrant.Value, key string) []string {
@@ -1489,6 +1633,211 @@ func payloadStringList(payload map[string]*qdrant.Value, key string) []string {
 		}
 	}
 	return out
+}
+
+func payloadString(payload map[string]*qdrant.Value, key, fallback string) string {
+	val, exists := payload[key]
+	if !exists || val == nil {
+		return fallback
+	}
+	str := val.GetStringValue()
+	if str == "" {
+		return fallback
+	}
+	return str
+}
+
+func payloadInt(payload map[string]*qdrant.Value, key string) int64 {
+	val, exists := payload[key]
+	if !exists || val == nil {
+		return 0
+	}
+	return val.GetIntegerValue()
+}
+
+func payloadBool(payload map[string]*qdrant.Value, key string) bool {
+	val, exists := payload[key]
+	if !exists || val == nil {
+		return false
+	}
+	return val.GetBoolValue()
+}
+
+func buildFileSymbolNames(path, relPath, namespace string, typeNames []string) []string {
+	var symbols []string
+	symbols = append(symbols, tokenizeForTags(filepath.Base(path))...)
+	symbols = append(symbols, tokenizeForTags(relPath)...)
+	symbols = append(symbols, tokenizeForTags(namespace)...)
+	for _, typeName := range typeNames {
+		symbols = append(symbols, tokenizeForTags(typeName)...)
+		symbols = append(symbols, normalizeSymbolVariants(typeName)...)
+	}
+	return uniqueSortedTags(symbols)
+}
+
+func buildFunctionSymbolNames(fn ast.FunctionNode) []string {
+	var symbols []string
+	symbols = append(symbols, tokenizeForTags(fn.Name)...)
+	symbols = append(symbols, tokenizeForTags(fn.Container)...)
+	symbols = append(symbols, tokenizeForTags(fn.Namespace)...)
+	symbols = append(symbols, normalizeSymbolVariants(fn.Name)...)
+	if fn.Container != "" {
+		symbols = append(symbols, normalizeSymbolVariants(fn.Container)...)
+		symbols = append(symbols, normalizeSymbolVariants(fn.Container+"."+fn.Name)...)
+	}
+	return uniqueSortedTags(symbols)
+}
+
+func normalizeSymbolVariants(input string) []string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil
+	}
+	base := filepath.Base(strings.ReplaceAll(input, "\\", "/"))
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	variants := []string{
+		strings.ToLower(base),
+		strings.ToLower(strings.ReplaceAll(base, "_", "")),
+		strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(base, "_", " "), ".", " ")),
+	}
+	return uniqueSortedTags(append(variants, tokenizeForTags(base)...))
+}
+
+func collectLayerTags(inputs ...interface{}) []string {
+	var tags []string
+	for _, input := range inputs {
+		switch v := input.(type) {
+		case string:
+			tags = append(tags, classifyRoleTags(v)...)
+		case []string:
+			for _, item := range v {
+				tags = append(tags, classifyRoleTags(item)...)
+			}
+		}
+	}
+	return uniqueSortedTags(tags)
+}
+
+func inferFreeformFrameworkTags(text string) []string {
+	lower := strings.ToLower(text)
+	return matchCanonicalTags(lower, map[string][]string{
+		"xunit": {"xunit"}, "nunit": {"nunit"}, "mstest": {"mstest"}, "efcore": {"efcore", "entity framework"},
+		"mediatr": {"mediatr"}, "fluentvalidation": {"fluentvalidation"}, "automapper": {"automapper"},
+		"aspnetcore": {"aspnetcore", "asp.net core"}, "serilog": {"serilog"}, "dapper": {"dapper"},
+		"hangfire": {"hangfire"}, "masstransit": {"masstransit"}, "gin": {"gin"}, "echo": {"echo"},
+		"fiber": {"fiber"}, "chi": {"chi"}, "grpc": {"grpc"}, "gorm": {"gorm"}, "sqlx": {"sqlx"},
+		"cobra": {"cobra"}, "viper": {"viper"}, "testify": {"testify"}, "gqlgen": {"gqlgen"},
+		"protobuf": {"protobuf"}, "react": {"react"}, "nextjs": {"nextjs", "next.js"}, "express": {"express"},
+		"nestjs": {"nestjs", "nest.js"}, "jest": {"jest"}, "vitest": {"vitest"}, "playwright": {"playwright"},
+		"cypress": {"cypress"}, "prisma": {"prisma"}, "mongoose": {"mongoose"}, "redux": {"redux"},
+		"vue": {"vue"}, "nuxt": {"nuxt"}, "django": {"django"}, "flask": {"flask"}, "fastapi": {"fastapi"},
+		"pytest": {"pytest"}, "sqlalchemy": {"sqlalchemy"}, "pydantic": {"pydantic"}, "pandas": {"pandas"},
+		"numpy": {"numpy"}, "celery": {"celery"}, "requests": {"requests"}, "laravel": {"laravel"},
+		"symfony": {"symfony"}, "phpunit": {"phpunit"}, "doctrine": {"doctrine"}, "livewire": {"livewire"}, "pest": {"pest"},
+	})
+}
+
+func detectTestFramework(tags []string) string {
+	for _, tag := range []string{"xunit", "nunit", "mstest", "jest", "vitest", "playwright", "cypress", "pytest", "phpunit", "pest", "testify"} {
+		if containsString(tags, tag) {
+			return tag
+		}
+	}
+	return ""
+}
+
+func hasTag(tags []string, target string) bool {
+	return containsString(tags, target)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func extractSymbolCandidates(query string) []string {
+	re := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_./-]*`)
+	matches := re.FindAllString(query, -1)
+	var symbols []string
+	for _, match := range matches {
+		symbols = append(symbols, normalizeSymbolVariants(match)...)
+	}
+	return uniqueSortedTags(symbols)
+}
+
+func looksLikeExactSymbolQuery(query string) bool {
+	return strings.ContainsAny(query, "/._") || regexp.MustCompile(`[a-z][A-Z]|[A-Z][a-z]+[A-Z]`).MatchString(query)
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func pointIdentity(point *qdrant.ScoredPoint) string {
+	if point == nil {
+		return ""
+	}
+	if point.Id != nil {
+		if uuid := point.Id.GetUuid(); uuid != "" {
+			return uuid
+		}
+		if num := point.Id.GetNum(); num != 0 {
+			return fmt.Sprintf("num:%d", num)
+		}
+	}
+	filePath := payloadString(point.Payload, "file_path", "")
+	name := payloadString(point.Payload, "name", "")
+	startLine := payloadInt(point.Payload, "start_line")
+	return fmt.Sprintf("%s|%s|%d", filePath, name, startLine)
+}
+
+func intersectCount(values []string, set map[string]struct{}) int {
+	count := 0
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		if _, ok := set[value]; ok {
+			count++
+		}
+	}
+	return count
+}
+
+func sliceToSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 func getParentDirs(relPath string) []string {

@@ -48,6 +48,15 @@ func (g Greeter) Greet(name string) {
 	if f2.Receiver != "(g Greeter)" && f2.Receiver != "g Greeter" {
 		t.Errorf("expected receiver g Greeter or (g Greeter), got %q", f2.Receiver)
 	}
+	if f2.Container != "Greeter" {
+		t.Errorf("expected container Greeter, got %q", f2.Container)
+	}
+	if res.Namespace != "main" {
+		t.Errorf("expected namespace/package main, got %q", res.Namespace)
+	}
+	if len(res.Types) != 1 || res.Types[0] != "Greeter" {
+		t.Errorf("expected type Greeter, got %+v", res.Types)
+	}
 
 	if len(res.Imports) != 1 || res.Imports[0].RawPath != "fmt" {
 		t.Errorf("expected import 'fmt', got %+v", res.Imports)
@@ -84,6 +93,38 @@ class Math:
 
 	if len(res.Imports) != 1 || res.Imports[0].RawPath != "os" {
 		t.Errorf("expected import os, got %+v", res.Imports)
+	}
+	if len(res.Functions) > 1 && res.Functions[1].Container != "Math" {
+		t.Errorf("expected method container Math, got %q", res.Functions[1].Container)
+	}
+}
+
+func TestParseCSharpCode_Metadata(t *testing.T) {
+	code := `
+using Xunit;
+namespace AgroOps.Application.Tests;
+
+public class DtcFrameDecoderServiceTests
+{
+    public void DecodeFrame_ShouldReturnExpectedResult()
+    {
+    }
+}
+`
+	ctx := context.Background()
+	res, err := ParseCodeToDocsWithMeta(ctx, "DtcFrameDecoderServiceTests.cs", []byte(code))
+	if err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if res.Namespace != "AgroOps.Application.Tests" {
+		t.Fatalf("expected namespace AgroOps.Application.Tests, got %q", res.Namespace)
+	}
+	if len(res.Types) == 0 || res.Types[0] != "DtcFrameDecoderServiceTests" {
+		t.Fatalf("expected type DtcFrameDecoderServiceTests, got %+v", res.Types)
+	}
+	if len(res.Functions) == 0 || res.Functions[0].Container != "DtcFrameDecoderServiceTests" {
+		t.Fatalf("expected method container DtcFrameDecoderServiceTests, got %+v", res.Functions)
 	}
 }
 
