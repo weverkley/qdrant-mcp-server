@@ -21,16 +21,17 @@ import (
 )
 
 type MockQdrantClient struct {
-	mu              sync.Mutex
-	upsertCalls     [][]*qdrant.PointStruct
-	upsertErr       error
-	scrollResp      []*qdrant.RetrievedPoint
-	scrollErr       error
-	deleteCalls     []string
-	queryCalls      []*qdrant.QueryPoints
-	queryResp       []*qdrant.ScoredPoint
-	queryErr        error
-	setPayloadCalls []*qdrant.SetPayloadPoints
+	mu                 sync.Mutex
+	upsertCalls        [][]*qdrant.PointStruct
+	upsertErr          error
+	scrollResp         []*qdrant.RetrievedPoint
+	scrollErr          error
+	deleteCalls        []string
+	deletePointsCalls  []*qdrant.DeletePoints
+	queryCalls         []*qdrant.QueryPoints
+	queryResp          []*qdrant.ScoredPoint
+	queryErr           error
+	setPayloadCalls    []*qdrant.SetPayloadPoints
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -44,6 +45,7 @@ func (m *MockQdrantClient) Delete(ctx context.Context, in *qdrant.DeletePoints) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deleteCalls = append(m.deleteCalls, in.CollectionName)
+	m.deletePointsCalls = append(m.deletePointsCalls, in)
 	return &qdrant.UpdateResult{}, nil
 }
 
@@ -1183,12 +1185,15 @@ func TestPurgeFileVectors_CompoundFilter(t *testing.T) {
 	worker := server.NewIngestionWorker(cfg, mock, nil)
 	defer worker.Close()
 
-	// Non-existent file triggers purge path
 	worker.SyncFileState(context.Background(), "/nonexistent/path/gone.go")
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	if len(mock.deleteCalls) != 1 {
-		t.Fatalf("expected 1 delete call, got %d", len(mock.deleteCalls))
+	if len(mock.deletePointsCalls) != 1 {
+		t.Fatalf("expected 1 delete call, got %d", len(mock.deletePointsCalls))
+	}
+	filter := mock.deletePointsCalls[0].Points.GetFilter()
+	if len(filter.Must) != 2 {
+		t.Fatalf("expected 2 Must conditions in purge filter, got %d", len(filter.Must))
 	}
 }
