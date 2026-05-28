@@ -21,15 +21,16 @@ import (
 )
 
 type MockQdrantClient struct {
-	mu          sync.Mutex
-	upsertCalls [][]*qdrant.PointStruct
-	upsertErr   error
-	scrollResp  []*qdrant.RetrievedPoint
-	scrollErr   error
-	deleteCalls []string
-	queryCalls  []*qdrant.QueryPoints
-	queryResp   []*qdrant.ScoredPoint
-	queryErr    error
+	mu              sync.Mutex
+	upsertCalls     [][]*qdrant.PointStruct
+	upsertErr       error
+	scrollResp      []*qdrant.RetrievedPoint
+	scrollErr       error
+	deleteCalls     []string
+	queryCalls      []*qdrant.QueryPoints
+	queryResp       []*qdrant.ScoredPoint
+	queryErr        error
+	setPayloadCalls []*qdrant.SetPayloadPoints
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -65,6 +66,13 @@ func (m *MockQdrantClient) Scroll(ctx context.Context, in *qdrant.ScrollPoints) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.scrollResp, m.scrollErr
+}
+
+func (m *MockQdrantClient) SetPayload(ctx context.Context, in *qdrant.SetPayloadPoints) (*qdrant.UpdateResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setPayloadCalls = append(m.setPayloadCalls, in)
+	return &qdrant.UpdateResult{}, nil
 }
 
 func TestBatchUpserter_BatchSizeTrigger(t *testing.T) {
@@ -1087,4 +1095,22 @@ func payloadTagsFromFirstPoint(t *testing.T, mockClient *MockQdrantClient) []str
 		tags = append(tags, v.GetStringValue())
 	}
 	return tags
+}
+
+func TestMockQdrantClient_SetPayload(t *testing.T) {
+	mock := &MockQdrantClient{}
+	ctx := context.Background()
+	_, err := mock.SetPayload(ctx, &qdrant.SetPayloadPoints{
+		CollectionName: "test",
+		Payload:        map[string]*qdrant.Value{"branch": qdrant.NewValueString("main")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mock.mu.Lock()
+	count := len(mock.setPayloadCalls)
+	mock.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 SetPayload call, got %d", count)
+	}
 }

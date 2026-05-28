@@ -36,6 +36,7 @@ type QdrantClient interface {
 	CreateCollection(ctx context.Context, in *qdrant.CreateCollection) error
 	Query(ctx context.Context, in *qdrant.QueryPoints) ([]*qdrant.ScoredPoint, error)
 	Scroll(ctx context.Context, in *qdrant.ScrollPoints) ([]*qdrant.RetrievedPoint, error)
+	SetPayload(ctx context.Context, in *qdrant.SetPayloadPoints) (*qdrant.UpdateResult, error)
 }
 
 type BatchUpserter struct {
