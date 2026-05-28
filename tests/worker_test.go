@@ -31,6 +31,7 @@ type MockQdrantClient struct {
 	queryCalls         []*qdrant.QueryPoints
 	queryResp          []*qdrant.ScoredPoint
 	queryErr           error
+	queryRespFn        func(*qdrant.QueryPoints) []*qdrant.ScoredPoint
 	setPayloadCalls    []*qdrant.SetPayloadPoints
 }
 
@@ -61,6 +62,9 @@ func (m *MockQdrantClient) Query(ctx context.Context, in *qdrant.QueryPoints) ([
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.queryCalls = append(m.queryCalls, in)
+	if m.queryRespFn != nil {
+		return m.queryRespFn(in), m.queryErr
+	}
 	return m.queryResp, m.queryErr
 }
 
@@ -598,7 +602,7 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 
 	// Test 1: Dense Search Mode
 	worker.Cfg.SearchMode = "dense"
-	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "", "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) == 0 {
@@ -618,7 +622,7 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 
 	// Test 2: Sparse Search Mode
 	worker.Cfg.SearchMode = "sparse"
-	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "", "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) == 0 {
@@ -638,7 +642,7 @@ func TestExecuteVectorSearch_SearchModes(t *testing.T) {
 
 	// Test 3: Hybrid Search Mode
 	worker.Cfg.SearchMode = "hybrid"
-	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "")
+	_, _ = worker.ExecuteVectorSearch(ctx, "test query", nil, "", "")
 
 	mockClient.mu.Lock()
 	if len(mockClient.queryCalls) == 0 {
@@ -1028,7 +1032,7 @@ func TestExecuteVectorSearch_ReranksUsingTags(t *testing.T) {
 		},
 	}
 
-	result, err := worker.ExecuteVectorSearch(context.Background(), "dtc frame decoder service tests", nil, "tests")
+	result, err := worker.ExecuteVectorSearch(context.Background(), "dtc frame decoder service tests", nil, "tests", "")
 	if err != nil {
 		t.Fatalf("ExecuteVectorSearch returned error: %v", err)
 	}
@@ -1231,5 +1235,125 @@ func TestSyncWorkspace_MigratesLegacyVectors(t *testing.T) {
 	}
 	if p["default_branch"].GetStringValue() != "main" {
 		t.Fatalf("expected migrated default_branch 'main', got %q", p["default_branch"].GetStringValue())
+	}
+}
+
+func TestExecuteVectorSearch_BranchPriority(t *testing.T) {
+	branchPoint := &qdrant.ScoredPoint{
+		Id:    qdrant.NewIDNum(1),
+		Score: 0.9,
+		Payload: map[string]*qdrant.Value{
+			"file_path":      qdrant.NewValueString("src/ast.go"),
+			"relative_path":  qdrant.NewValueString("src/ast.go"),
+			"content":        qdrant.NewValueString("branch version of ast"),
+			"type":           qdrant.NewValueString("chunk"),
+			"branch":         qdrant.NewValueString("feature/test"),
+			"default_branch": qdrant.NewValueString("main"),
+		},
+	}
+	basePoint := &qdrant.ScoredPoint{
+		Id:    qdrant.NewIDNum(2),
+		Score: 0.85,
+		Payload: map[string]*qdrant.Value{
+			"file_path":      qdrant.NewValueString("src/server.go"),
+			"relative_path":  qdrant.NewValueString("src/server.go"),
+			"content":        qdrant.NewValueString("base version of server"),
+			"type":           qdrant.NewValueString("chunk"),
+			"branch":         qdrant.NewValueString("main"),
+			"default_branch": qdrant.NewValueString("main"),
+		},
+	}
+
+	mock := &MockQdrantClient{}
+	mock.queryRespFn = func(in *qdrant.QueryPoints) []*qdrant.ScoredPoint {
+		if in.GetFilter() != nil {
+			for _, cond := range in.GetFilter().GetMust() {
+				if kw := cond.GetField().GetMatch().GetKeyword(); kw == "feature/test" {
+					return []*qdrant.ScoredPoint{branchPoint}
+				}
+			}
+		}
+		return []*qdrant.ScoredPoint{basePoint}
+	}
+
+	cfg := server.Config{
+		CollectionName:      "test",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		SearchMode:          "dense",
+		Branch:              "feature/test",
+		DefaultBranch:       "main",
+	}
+	worker := server.NewIngestionWorker(cfg, mock, nil)
+	defer worker.Close()
+
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"embedding":[0.1,0.2,0.3]}`)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.HTTPClient.Transport = mockHTTP
+
+	result, err := worker.ExecuteVectorSearch(context.Background(), "ast parsing", nil, "", "feature/test")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if !strings.Contains(result, "branch version of ast") {
+		t.Error("expected branch-specific result in output")
+	}
+	if !strings.Contains(result, "base version of server") {
+		t.Error("expected base fallback result for uncovered file")
+	}
+	if strings.Count(result, "src/ast.go") > 1 {
+		t.Error("src/ast.go appeared more than once — branch dedup failed")
+	}
+}
+
+func TestExecuteVectorSearch_NoBranchNoFilter(t *testing.T) {
+	mock := &MockQdrantClient{queryResp: []*qdrant.ScoredPoint{}}
+	cfg := server.Config{
+		CollectionName:      "test",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		SearchMode:          "dense",
+	}
+	worker := server.NewIngestionWorker(cfg, mock, nil)
+	defer worker.Close()
+
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"embedding":[0.1,0.2,0.3]}`)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.HTTPClient.Transport = mockHTTP
+
+	_, err := worker.ExecuteVectorSearch(context.Background(), "test query", nil, "", "")
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	for _, call := range mock.queryCalls {
+		if call.Filter == nil {
+			continue
+		}
+		for _, cond := range call.Filter.Must {
+			kw := cond.GetField().GetMatch().GetKeyword()
+			if kw == "main" || kw == "feature/test" {
+				t.Errorf("unexpected branch filter in no-branch search: %q", kw)
+			}
+		}
 	}
 }

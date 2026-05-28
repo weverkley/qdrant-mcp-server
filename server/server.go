@@ -88,7 +88,7 @@ func Start(version string) {
 			defer worker.Close()
 
 			query := strings.Join(os.Args[2:], " ")
-			results, err := worker.ExecuteVectorSearch(context.Background(), query, nil, "")
+			results, err := worker.ExecuteVectorSearch(context.Background(), query, nil, "", "")
 			if err != nil {
 				log.Fatalf("Search failed: %v", err)
 			}
@@ -107,7 +107,7 @@ func Start(version string) {
 			suites := defaultEvaluationQueries(cfg.WatchDirectory)
 			passed := 0
 			for _, suite := range suites {
-				result, err := worker.ExecuteVectorSearch(context.Background(), suite.Query, suite.FileExtensions, suite.PathPrefix)
+				result, err := worker.ExecuteVectorSearch(context.Background(), suite.Query, suite.FileExtensions, suite.PathPrefix, "")
 				if err != nil {
 					log.Printf("Evaluation query failed for %q: %v", suite.Query, err)
 					continue

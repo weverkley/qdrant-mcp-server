@@ -1007,23 +1007,77 @@ func (iw *IngestionWorker) chunkText(text string, size int) []string {
 	return chunks
 }
 
-func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string) (string, error) {
+func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string, fileExtensions []string, pathPrefix string, branch string) (string, error) {
 	intent := detectQueryIntent(query, fileExtensions, pathPrefix)
-	qdrantFilter := buildSearchFilter(fileExtensions, pathPrefix)
+	baseFilter := buildSearchFilter(fileExtensions, pathPrefix)
 	candidateLimit := uint64(40)
 	finalLimit := 5
-
 	variantQueries := buildQueryVariants(intent, pathPrefix)
-	variantResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
-	for _, variant := range variantQueries {
-		results, err := iw.queryVariant(ctx, variant, qdrantFilter, candidateLimit)
-		if err != nil {
-			return "", fmt.Errorf("qdrant search operation failed for variant %q: %w", variant, err)
+
+	var ranked []RankedSearchResult
+
+	if branch != "" {
+		// Pass 1: branch-specific results
+		branchFilter := addBranchFilter(baseFilter, branch)
+		branchResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
+		for _, variant := range variantQueries {
+			results, err := iw.queryVariant(ctx, variant, branchFilter, candidateLimit)
+			if err != nil {
+				return "", fmt.Errorf("branch search failed for variant %q: %w", variant, err)
+			}
+			branchResults[variant] = results
 		}
-		variantResults[variant] = results
+		branchRanked := rerankSearchResults(branchResults, intent, pathPrefix)
+
+		coveredPaths := make(map[string]struct{}, len(branchRanked))
+		defaultBranch := iw.Cfg.DefaultBranch
+		for _, r := range branchRanked {
+			if rp := payloadString(r.Point.Payload, "relative_path", ""); rp != "" {
+				coveredPaths[rp] = struct{}{}
+			}
+			if db := payloadString(r.Point.Payload, "default_branch", ""); db != "" {
+				defaultBranch = db
+			}
+		}
+
+		// Pass 2: default branch fallback for files not in branch results
+		defaultFilter := addBranchFilter(baseFilter, defaultBranch)
+		fallbackResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
+		for _, variant := range variantQueries {
+			results, err := iw.queryVariant(ctx, variant, defaultFilter, candidateLimit)
+			if err != nil {
+				return "", fmt.Errorf("fallback search failed for variant %q: %w", variant, err)
+			}
+			fallbackResults[variant] = results
+		}
+		fallbackRanked := rerankSearchResults(fallbackResults, intent, pathPrefix)
+
+		ranked = branchRanked
+		for _, r := range fallbackRanked {
+			if rp := payloadString(r.Point.Payload, "relative_path", ""); rp != "" {
+				if _, covered := coveredPaths[rp]; !covered {
+					ranked = append(ranked, r)
+				}
+			}
+		}
+		sort.SliceStable(ranked, func(i, j int) bool {
+			if ranked[i].Score == ranked[j].Score {
+				return ranked[i].Point.Score > ranked[j].Point.Score
+			}
+			return ranked[i].Score > ranked[j].Score
+		})
+	} else {
+		variantResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
+		for _, variant := range variantQueries {
+			results, err := iw.queryVariant(ctx, variant, baseFilter, candidateLimit)
+			if err != nil {
+				return "", fmt.Errorf("qdrant search operation failed for variant %q: %w", variant, err)
+			}
+			variantResults[variant] = results
+		}
+		ranked = rerankSearchResults(variantResults, intent, pathPrefix)
 	}
 
-	ranked := rerankSearchResults(variantResults, intent, pathPrefix)
 	if len(ranked) == 0 {
 		return "No relevant structural code blocks or reference components were found matching your query scope.", nil
 	}
@@ -1040,6 +1094,9 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 	if len(intent.LayerTags) > 0 {
 		sb.WriteString(fmt.Sprintf(" | layers=`%s`", strings.Join(intent.LayerTags, "`, `")))
 	}
+	if branch != "" {
+		sb.WriteString(fmt.Sprintf(" | branch=`%s`", branch))
+	}
 	sb.WriteString(fmt.Sprintf(" | variants=%d\n\n", len(variantQueries)))
 
 	for i, rankedPoint := range ranked {
@@ -1050,6 +1107,7 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		tagList := payloadStringList(payloadMap, "tags")
 		typeStr := payloadString(payloadMap, "type", "")
 		lang := detectLanguage(filePath)
+		resultBranch := payloadString(payloadMap, "branch", "")
 		lastSyncedStr := "Unknown"
 		if uVal, exists := payloadMap["updated"]; exists {
 			lastSyncedStr = time.Unix(uVal.GetIntegerValue(), 0).Format("2006-01-02 15:04:05")
@@ -1062,23 +1120,22 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 			endLine := payloadInt(payloadMap, "end_line")
 			receiverVal := payloadString(payloadMap, "receiver", "")
 			containerVal := payloadString(payloadMap, "container", "")
-
 			if receiverVal != "" {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `(%s).%s` in %s (Lines %d-%d) [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, receiverVal, nameVal, filePath, startLine, endLine, resultBranch, rankedPoint.Score, lastSyncedStr))
 			} else if containerVal != "" {
-				sb.WriteString(fmt.Sprintf("#### [%d] Method: `%s.%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, containerVal, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+				sb.WriteString(fmt.Sprintf("#### [%d] Method: `%s.%s` in %s (Lines %d-%d) [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, containerVal, nameVal, filePath, startLine, endLine, resultBranch, rankedPoint.Score, lastSyncedStr))
 			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, rankedPoint.Score, lastSyncedStr))
+				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, resultBranch, rankedPoint.Score, lastSyncedStr))
 			}
 		case "doc_chunk":
 			pageVal := payloadInt(payloadMap, "page_number")
 			if pageVal > 0 {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, rankedPoint.Score, lastSyncedStr))
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
 			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, rankedPoint.Score, lastSyncedStr))
+				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
 			}
 		default:
-			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, rankedPoint.Score, lastSyncedStr))
+			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
 		}
 
 		if namespace := payloadString(payloadMap, "namespace", ""); namespace != "" {
@@ -1090,7 +1147,6 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		if len(rankedPoint.Reasons) > 0 {
 			sb.WriteString(fmt.Sprintf("Signals: `%s`\n", strings.Join(rankedPoint.Reasons, "`, `")))
 		}
-
 		sb.WriteString(fmt.Sprintf("```%s\n", lang))
 		sb.WriteString(contentChunk)
 		if !strings.HasSuffix(contentChunk, "\n") {
@@ -1521,6 +1577,17 @@ func buildQueryVariants(intent SearchIntent, pathPrefix string) []string {
 		variants = append(variants, intent.Query+" "+pathPrefix)
 	}
 	return uniqueNonEmptyStrings(variants)
+}
+
+// addBranchFilter clones the base filter and appends a branch match condition.
+func addBranchFilter(base *qdrant.Filter, branch string) *qdrant.Filter {
+	branchCond := qdrant.NewMatchKeyword("branch", branch)
+	if base == nil {
+		return &qdrant.Filter{Must: []*qdrant.Condition{branchCond}}
+	}
+	existing := make([]*qdrant.Condition, len(base.Must))
+	copy(existing, base.Must)
+	return &qdrant.Filter{Must: append(existing, branchCond)}
 }
 
 func buildSearchFilter(fileExtensions []string, pathPrefix string) *qdrant.Filter {

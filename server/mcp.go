@@ -144,7 +144,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 
 			// Process the RAG search query across the local network interface
 			go func() {
-				resultsText, err := iw.ExecuteVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix)
+				resultsText, err := iw.ExecuteVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix, "")
 				if err != nil {
 					log.Printf("Internal RAG search failed: %v", err)
 					iw.sendMCPError(req.ID, -32603, fmt.Sprintf("Search execution error: %v", err))
