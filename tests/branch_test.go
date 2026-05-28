@@ -15,7 +15,20 @@ func initGitRepo(t *testing.T, dir string) {
 		{"init"},
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
-		{"checkout", "-b", "main"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	f := filepath.Join(dir, ".gitkeep")
+	if err := os.WriteFile(f, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "."},
+		{"commit", "-m", "init"},
+		{"checkout", "-B", "main"},
 	} {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -38,11 +51,14 @@ func TestDetectBranches_FeatureBranch(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
 
-	f := filepath.Join(dir, "a.txt")
-	os.WriteFile(f, []byte("x"), 0644)
-	exec.Command("git", "-C", dir, "add", ".").Run()
-	exec.Command("git", "-C", dir, "commit", "-m", "init").Run()
-	exec.Command("git", "-C", dir, "checkout", "-b", "feature/test").Run()
+	for _, args := range [][]string{
+		{"checkout", "-b", "feature/test"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
 
 	current, _ := server.DetectBranches(dir)
 	if current != "feature/test" {
