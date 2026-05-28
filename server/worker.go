@@ -431,10 +431,13 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		defer func() { <-iw.Sem }()
 	}
 
+	relPath, _ := filepath.Rel(iw.Cfg.WatchDirectory, path)
+	relPath = filepath.ToSlash(relPath)
+
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		log.Printf("File removed on dev machine, purging remote vectors: %s", path)
-		_ = iw.purgeFileVectors(ctx, path)
+		_ = iw.purgeFileVectors(ctx, relPath)
 		ast.EvictTree(path)
 		return
 	} else if err != nil {
@@ -473,7 +476,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		CollectionName: iw.Cfg.CollectionName,
 		Filter: &qdrant.Filter{
 			Must: []*qdrant.Condition{
-				qdrant.NewMatchKeyword("file_path", path),
+				qdrant.NewMatchKeyword("relative_path", relPath),
 			},
 		},
 		Limit:       qdrant.PtrOf(uint32(1)),
@@ -489,11 +492,10 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	}
 
 	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
-	_ = iw.purgeFileVectors(ctx, path)
+	_ = iw.purgeFileVectors(ctx, relPath)
 
 	ext := strings.ToLower(filepath.Ext(path))
 	extClean := strings.TrimPrefix(ext, ".")
-	relPath, _ := filepath.Rel(iw.Cfg.WatchDirectory, path)
 	relDirs := convertStringSlice(getParentDirs(relPath))
 	modifiedUnix := info.ModTime().Unix()
 	var points []*qdrant.PointStruct
@@ -564,9 +566,9 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				}
 
 				// Ensure unique points across workspace updates
-				deterministicSeed := fmt.Sprintf("%s_func_%s_%d", path, fn.Name, idx)
+				deterministicSeed := fmt.Sprintf("%s_func_%s_%d", relPath, fn.Name, idx)
 				if len(chunks) > 1 {
-					deterministicSeed = fmt.Sprintf("%s_func_%s_%d_chunk_%d", path, fn.Name, idx, chunkIdx)
+					deterministicSeed = fmt.Sprintf("%s_func_%s_%d_chunk_%d", relPath, fn.Name, idx, chunkIdx)
 				}
 				hash := sha1.Sum([]byte(deterministicSeed))
 				id, _ := uuid.FromBytes(hash[:16])
@@ -574,7 +576,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				pointTags := mergeTags(fileTags, frameworkTags, layerTags, buildFunctionTags(fn, imports))
 				pointSymbols := mergeTags(symbolNames, buildFunctionSymbolNames(fn))
 				payload := map[string]interface{}{
-					"file_path":      path,
+					"file_path":      relPath,
 					"content":        chunk,
 					"type":           "function",
 					"name":           fn.Name,
@@ -622,13 +624,13 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			}
 
 			// Ensure unique points across updates
-			deterministicSeed := fmt.Sprintf("%s_doc_chunk_%d", path, idx)
+			deterministicSeed := fmt.Sprintf("%s_doc_chunk_%d", relPath, idx)
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
 			pointTags := mergeTags(fileTags, layerTags, []string{"document"})
 			payload := map[string]interface{}{
-				"file_path":      path,
+				"file_path":      relPath,
 				"content":        chunk.Content,
 				"type":           "doc_chunk",
 				"hash":           chunk.Hash,
@@ -673,13 +675,13 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			}
 
 			// Ensure unique points across workspace updates
-			deterministicSeed := fmt.Sprintf("%s_chunk_%d", path, idx)
+			deterministicSeed := fmt.Sprintf("%s_chunk_%d", relPath, idx)
 			hash := sha1.Sum([]byte(deterministicSeed))
 			id, _ := uuid.FromBytes(hash[:16])
 
 			pointTags := mergeTags(fileTags, frameworkTags, layerTags, []string{"file_chunk"})
 			payload := map[string]interface{}{
-				"file_path":      path,
+				"file_path":      relPath,
 				"content":        chunk,
 				"type":           "chunk",
 				"extension":      extClean,
@@ -719,12 +721,12 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	}
 }
 
-func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, path string) error {
+func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, relPath string) error {
 	_, err := iw.QdrantClient.Delete(ctx, &qdrant.DeletePoints{
 		CollectionName: iw.Cfg.CollectionName,
 		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
 			Must: []*qdrant.Condition{
-				qdrant.NewMatchKeyword("file_path", path),
+				qdrant.NewMatchKeyword("relative_path", relPath),
 			},
 		}),
 	})
