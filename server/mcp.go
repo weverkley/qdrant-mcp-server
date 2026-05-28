@@ -27,6 +27,7 @@ type SearchArguments struct {
 	Query          string   `json:"query"`
 	FileExtensions []string `json:"file_extensions,omitempty"`
 	PathPrefix     string   `json:"path_prefix,omitempty"`
+	Branch         string   `json:"branch,omitempty"`
 }
 
 func (iw *IngestionWorker) ListenToMCPClient(ctx context.Context) {
@@ -99,6 +100,10 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 									"type":        "string",
 									"description": "Optional path prefix to restrict the search to (e.g., 'src/auth').",
 								},
+								"branch": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional git branch name for branch-priority search (e.g. 'feature/improvements'). Results from this branch take priority; files not modified on this branch fall back to the default branch.",
+								},
 							},
 							"required": []string{"query"},
 						},
@@ -144,7 +149,7 @@ func (iw *IngestionWorker) handleMCPMethod(req MCPRequest) {
 
 			// Process the RAG search query across the local network interface
 			go func() {
-				resultsText, err := iw.ExecuteVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix, "")
+				resultsText, err := iw.ExecuteVectorSearch(context.Background(), args.Query, args.FileExtensions, args.PathPrefix, args.Branch)
 				if err != nil {
 					log.Printf("Internal RAG search failed: %v", err)
 					iw.sendMCPError(req.ID, -32603, fmt.Sprintf("Search execution error: %v", err))

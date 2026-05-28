@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -1357,5 +1358,16 @@ func TestExecuteVectorSearch_NoBranchNoFilter(t *testing.T) {
 				t.Errorf("unexpected branch filter in no-branch search: %q", kw)
 			}
 		}
+	}
+}
+
+func TestSearchArguments_BranchField(t *testing.T) {
+	raw := `{"query":"test","branch":"feature/test"}`
+	var args server.SearchArguments
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if args.Branch != "feature/test" {
+		t.Fatalf("expected branch 'feature/test', got %q", args.Branch)
 	}
 }
