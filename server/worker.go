@@ -478,6 +478,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		Filter: &qdrant.Filter{
 			Must: []*qdrant.Condition{
 				qdrant.NewMatchKeyword("relative_path", relPath),
+				qdrant.NewMatchKeyword("branch", iw.Cfg.Branch),
 			},
 		},
 		Limit:       qdrant.PtrOf(uint32(1)),
@@ -598,6 +599,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 					"file_hash":      localHash,
 					"modified":       modifiedUnix,
 					"updated":        time.Now().Unix(),
+					"branch":         iw.Cfg.Branch,
+					"default_branch": iw.Cfg.DefaultBranch,
 				}
 				if fn.Receiver != "" {
 					payload["receiver"] = fn.Receiver
@@ -648,6 +651,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				"file_hash":      localHash,
 				"modified":       modifiedUnix,
 				"updated":        time.Now().Unix(),
+				"branch":         iw.Cfg.Branch,
+				"default_branch": iw.Cfg.DefaultBranch,
 			}
 			if chunk.PageNumber > 0 {
 				payload["page_number"] = int64(chunk.PageNumber)
@@ -698,6 +703,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				"file_hash":      localHash,
 				"modified":       modifiedUnix,
 				"updated":        time.Now().Unix(),
+				"branch":         iw.Cfg.Branch,
+				"default_branch": iw.Cfg.DefaultBranch,
 			}
 
 			searchText := buildSearchText(chunk, pointTags, symbolNames, namespace, "", relPath)
@@ -728,6 +735,7 @@ func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, relPath string)
 		Points: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
 			Must: []*qdrant.Condition{
 				qdrant.NewMatchKeyword("relative_path", relPath),
+				qdrant.NewMatchKeyword("branch", iw.Cfg.Branch),
 			},
 		}),
 	})

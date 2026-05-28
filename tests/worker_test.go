@@ -1114,3 +1114,81 @@ func TestMockQdrantClient_SetPayload(t *testing.T) {
 		t.Fatalf("expected 1 SetPayload call, got %d", count)
 	}
 }
+
+func TestSyncFileState_BranchPayload(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "branch_payload_*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Write([]byte("hello branch"))
+	tmpFile.Close()
+
+	mock := &MockQdrantClient{}
+	cfg := server.Config{
+		CollectionName:      "test",
+		WatchDirectory:      os.TempDir(),
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		BatchSize:           1,
+		BatchTimeout:        1 * time.Second,
+		Branch:              "feature/test",
+		DefaultBranch:       "main",
+	}
+	worker := server.NewIngestionWorker(cfg, mock, nil)
+	defer worker.Close()
+
+	mockHTTP := &MockRoundTripper{
+		RoundTripFunc: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(`{"embedding":[0.1,0.2,0.3]}`)),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+	worker.HTTPClient.Transport = mockHTTP
+
+	worker.SyncFileState(context.Background(), tmpFile.Name())
+	worker.BatchUpserter.Flush()
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if len(mock.upsertCalls) == 0 {
+		t.Fatal("expected upsert calls, got none")
+	}
+	for _, batch := range mock.upsertCalls {
+		for _, point := range batch {
+			branch := point.Payload["branch"].GetStringValue()
+			if branch != "feature/test" {
+				t.Fatalf("expected branch 'feature/test', got %q", branch)
+			}
+			defBranch := point.Payload["default_branch"].GetStringValue()
+			if defBranch != "main" {
+				t.Fatalf("expected default_branch 'main', got %q", defBranch)
+			}
+		}
+	}
+}
+
+func TestPurgeFileVectors_CompoundFilter(t *testing.T) {
+	mock := &MockQdrantClient{}
+	cfg := server.Config{
+		CollectionName: "test",
+		WatchDirectory: os.TempDir(),
+		Branch:         "feature/test",
+		DefaultBranch:  "main",
+	}
+	worker := server.NewIngestionWorker(cfg, mock, nil)
+	defer worker.Close()
+
+	// Non-existent file triggers purge path
+	worker.SyncFileState(context.Background(), "/nonexistent/path/gone.go")
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if len(mock.deleteCalls) != 1 {
+		t.Fatalf("expected 1 delete call, got %d", len(mock.deleteCalls))
+	}
+}
