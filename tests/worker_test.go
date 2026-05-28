@@ -1197,3 +1197,39 @@ func TestPurgeFileVectors_CompoundFilter(t *testing.T) {
 		t.Fatalf("expected 2 Must conditions in purge filter, got %d", len(filter.Must))
 	}
 }
+
+func TestSyncWorkspace_MigratesLegacyVectors(t *testing.T) {
+	dir := t.TempDir()
+	mock := &MockQdrantClient{}
+	cfg := server.Config{
+		WatchDirectory:      dir,
+		CollectionName:      "test",
+		OllamaHost:          "http://localhost:11434",
+		EmbeddingModel:      "nomic-embed-text",
+		MaxEmbeddingWorkers: 1,
+		BatchSize:           10,
+		BatchTimeout:        1 * time.Second,
+		Branch:              "main",
+		DefaultBranch:       "main",
+	}
+	worker := server.NewIngestionWorker(cfg, mock, nil)
+	defer worker.Close()
+
+	_, err := worker.SyncWorkspace(context.Background())
+	if err != nil {
+		t.Fatalf("SyncWorkspace failed: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if len(mock.setPayloadCalls) == 0 {
+		t.Fatal("expected SetPayload migration call, got none")
+	}
+	p := mock.setPayloadCalls[0].Payload
+	if p["branch"].GetStringValue() != "main" {
+		t.Fatalf("expected migrated branch 'main', got %q", p["branch"].GetStringValue())
+	}
+	if p["default_branch"].GetStringValue() != "main" {
+		t.Fatalf("expected migrated default_branch 'main', got %q", p["default_branch"].GetStringValue())
+	}
+}

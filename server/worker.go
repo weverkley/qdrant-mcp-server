@@ -742,6 +742,31 @@ func (iw *IngestionWorker) purgeFileVectors(ctx context.Context, relPath string)
 	return err
 }
 
+// migrateUnbrandedVectors tags legacy vectors (missing or empty branch field)
+// with the current branch and default_branch. Called once at the start of SyncWorkspace.
+func (iw *IngestionWorker) migrateUnbrandedVectors(ctx context.Context) error {
+	filter := &qdrant.Filter{
+		Should: []*qdrant.Condition{
+			qdrant.NewIsEmpty("branch"),
+			qdrant.NewMatchKeyword("branch", ""),
+		},
+	}
+	_, err := iw.QdrantClient.SetPayload(ctx, &qdrant.SetPayloadPoints{
+		CollectionName: iw.Cfg.CollectionName,
+		Payload: map[string]*qdrant.Value{
+			"branch":         qdrant.NewValueString(iw.Cfg.Branch),
+			"default_branch": qdrant.NewValueString(iw.Cfg.DefaultBranch),
+		},
+		PointsSelector: qdrant.NewPointsSelectorFilter(filter),
+	})
+	if err != nil {
+		return fmt.Errorf("migration of legacy vectors failed: %w", err)
+	}
+	log.Printf("Branch migration complete: tagged legacy vectors with branch=%q default_branch=%q",
+		iw.Cfg.Branch, iw.Cfg.DefaultBranch)
+	return nil
+}
+
 func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 	// 1. Ensure the dedicated collection exists
 	exists, err := iw.QdrantClient.CollectionExists(ctx, iw.Cfg.CollectionName)
@@ -773,6 +798,10 @@ func (iw *IngestionWorker) SyncWorkspace(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("failed to create Qdrant collection '%s': %w", iw.Cfg.CollectionName, err)
 		}
 		log.Printf("Collection '%s' successfully created.", iw.Cfg.CollectionName)
+	}
+
+	if err := iw.migrateUnbrandedVectors(ctx); err != nil {
+		log.Printf("Warning: branch migration failed (non-fatal): %v", err)
 	}
 
 	// 2. Discover files
