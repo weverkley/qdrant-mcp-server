@@ -30,6 +30,8 @@ type Config struct {
 	SearchMode          string        // search mode: "dense", "sparse", or "hybrid" (default: "dense")
 	ExcludeExtensions   []string      // file extensions to exclude from indexing (default: .sql)
 	MaxFileSize         int64         // maximum file size in bytes to index (default: 1MB)
+	Branch        string // current git branch, auto-detected at startup
+	DefaultBranch string // repo default branch, auto-detected at startup
 }
 
 
@@ -136,7 +138,7 @@ func LoadConfig() Config {
 		}
 	}
 
-	return Config{
+	cfg := Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
 		CollectionName:      os.Getenv("QDRANT_COLLECTION"),
@@ -155,6 +157,9 @@ func LoadConfig() Config {
 		ExcludeExtensions:   excludeExts,
 		MaxFileSize:         maxFileSize,
 	}
+	cfg.Branch, cfg.DefaultBranch = DetectBranches(cfg.WatchDirectory)
+	log.Printf("Branch context: current=%q default=%q", cfg.Branch, cfg.DefaultBranch)
+	return cfg
 }
 
 // Helper to look up specific slice elements quickly

@@ -140,3 +140,9 @@ func TestConfig_SearchModeParsing(t *testing.T) {
 		t.Errorf("Expected flags2[SEARCH_MODE] to be dense, got %s", flags2["SEARCH_MODE"])
 	}
 }
+
+func TestConfig_BranchFieldsPresent(t *testing.T) {
+	cfg := server.Config{}
+	_ = cfg.Branch
+	_ = cfg.DefaultBranch
+}
