@@ -1041,6 +1041,9 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 		}
 
 		// Pass 2: default branch fallback for files not in branch results
+		if defaultBranch == "" {
+			defaultBranch = "main"
+		}
 		defaultFilter := addBranchFilter(baseFilter, defaultBranch)
 		fallbackResults := make(map[string][]*qdrant.ScoredPoint, len(variantQueries))
 		for _, variant := range variantQueries {

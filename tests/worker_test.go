@@ -1273,7 +1273,9 @@ func TestExecuteVectorSearch_BranchPriority(t *testing.T) {
 				}
 			}
 		}
-		return []*qdrant.ScoredPoint{basePoint}
+		// Default branch pass returns BOTH points — including branchPoint (same file as pass 1)
+		// Dedup logic should exclude branchPoint from the merged result since src/ast.go is already covered
+		return []*qdrant.ScoredPoint{branchPoint, basePoint}
 	}
 
 	cfg := server.Config{
