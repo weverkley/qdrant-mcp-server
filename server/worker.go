@@ -325,7 +325,7 @@ func NewIngestionWorker(cfg Config, qdrantClient QdrantClient, gitIgnore *GitIgn
 	iw := &IngestionWorker{
 		Cfg:              cfg,
 		QdrantClient:     qdrantClient,
-		HTTPClient:       &http.Client{Timeout: 15 * time.Second},
+		HTTPClient:       &http.Client{Timeout: 120 * time.Second},
 		PendingFiles:     make(map[string]time.Time),
 		Sem:              make(chan struct{}, maxWorkers),
 		GitignoreMatcher: gitIgnore,
@@ -411,8 +411,9 @@ func (iw *IngestionWorker) ShouldIgnoreFile(path string, isDir bool) bool {
 }
 
 type OllamaEmbedReq struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model   string                 `json:"model"`
+	Prompt  string                 `json:"prompt"`
+	Options map[string]interface{} `json:"options,omitempty"`
 }
 
 type OllamaEmbedResp struct {
@@ -554,8 +555,8 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		for idx, fn := range functions {
 			// Chunk very large functions to prevent Ollama context failures
 			chunks := []string{fn.Signature}
-			if len(fn.Signature) > 8000 {
-				chunks = iw.chunkText(fn.Signature, 8000)
+			if len(fn.Signature) > 4000 {
+				chunks = iw.chunkText(fn.Signature, 4000)
 				log.Printf("AST function %s in %s is very large (%d chars). Chunked into %d parts for embedding.", fn.Name, path, len(fn.Signature), len(chunks))
 			}
 
@@ -913,7 +914,13 @@ func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string
 		}
 
 		startTime := time.Now()
-		payload, _ := json.Marshal(OllamaEmbedReq{Model: iw.Cfg.EmbeddingModel, Prompt: text})
+		payload, _ := json.Marshal(OllamaEmbedReq{
+			Model:  iw.Cfg.EmbeddingModel,
+			Prompt: text,
+			Options: map[string]interface{}{
+				"num_ctx": iw.Cfg.OllamaNumCtx,
+			},
+		})
 		req, _ := http.NewRequestWithContext(ctx, "POST", iw.Cfg.OllamaHost+"/api/embeddings", bytes.NewBuffer(payload))
 		req.Header.Set("Content-Type", "application/json")
 
@@ -934,12 +941,11 @@ func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string
 			continue
 		}
 
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusInternalServerError {
 			iw.ConcurrencyController.RecordFailure(fmt.Sprintf("Ollama overloaded: HTTP %d", resp.StatusCode))
 			iw.ConcurrencyController.Release()
 			lastErr = fmt.Errorf("ollama overloaded: HTTP %d", resp.StatusCode)
+			resp.Body.Close()
 
 			select {
 			case <-ctx.Done():
@@ -954,6 +960,7 @@ func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string
 			iw.ConcurrencyController.RecordFailure(fmt.Sprintf("HTTP error status: %d", resp.StatusCode))
 			iw.ConcurrencyController.Release()
 			lastErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
+			resp.Body.Close()
 
 			select {
 			case <-ctx.Done():
@@ -968,6 +975,7 @@ func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			iw.ConcurrencyController.RecordFailure("JSON decode error")
 			iw.ConcurrencyController.Release()
+			resp.Body.Close()
 			lastErr = err
 
 			select {
@@ -980,6 +988,7 @@ func (iw *IngestionWorker) FetchRemoteEmbedding(ctx context.Context, text string
 		}
 
 		// Success!
+		resp.Body.Close()
 		iw.ConcurrencyController.RecordSuccess(duration)
 		iw.ConcurrencyController.Release()
 		return out.Embedding, nil

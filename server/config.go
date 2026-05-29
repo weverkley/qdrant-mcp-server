@@ -30,6 +30,7 @@ type Config struct {
 	SearchMode          string        // search mode: "dense", "sparse", or "hybrid" (default: "dense")
 	ExcludeExtensions   []string      // file extensions to exclude from indexing (default: .sql)
 	MaxFileSize         int64         // maximum file size in bytes to index (default: 1MB)
+	OllamaNumCtx        int           // Ollama num_ctx override (default: 8192)
 	Branch        string // current git branch, auto-detected at startup
 	DefaultBranch string // repo default branch, auto-detected at startup
 }
@@ -138,6 +139,15 @@ func LoadConfig() Config {
 		}
 	}
 
+	ollamaNumCtx := 8192
+	if numCtxStr := os.Getenv("OLLAMA_NUM_CTX"); numCtxStr != "" {
+		if n, err := strconv.Atoi(numCtxStr); err == nil && n > 0 {
+			ollamaNumCtx = n
+		} else {
+			log.Printf("Warning: OLLAMA_NUM_CTX '%s' is not a valid positive integer, falling back to default 8192", numCtxStr)
+		}
+	}
+
 	cfg := Config{
 		QdrantHost:          host,
 		QdrantPort:          port,
@@ -156,6 +166,7 @@ func LoadConfig() Config {
 		SearchMode:          searchMode,
 		ExcludeExtensions:   excludeExts,
 		MaxFileSize:         maxFileSize,
+		OllamaNumCtx:        ollamaNumCtx,
 	}
 	cfg.Branch, cfg.DefaultBranch = DetectBranches(cfg.WatchDirectory)
 	log.Printf("Branch context: current=%q default=%q", cfg.Branch, cfg.DefaultBranch)
@@ -200,7 +211,7 @@ func PreprocessConfig() {
 	requiredKeys := []string{
 		"QDRANT_HOST", "QDRANT_PORT", "QDRANT_COLLECTION", "WATCH_DIRECTORY",
 		"OLLAMA_HOST", "EMBEDDING_MODEL", "EXCLUDE_DIRS", "INCLUDE_HIDDEN_DIRS",
-		"PARSER_MODE", "MAX_EMBEDDING_WORKERS",
+		"PARSER_MODE", "MAX_EMBEDDING_WORKERS", "OLLAMA_NUM_CTX",
 	}
 
 	hasMissing := false
