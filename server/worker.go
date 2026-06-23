@@ -462,7 +462,9 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		return
 	}
 
-	if isBinaryContent(content) {
+	// Parseable document formats (PDF/Office) are binary on disk but handled by
+	// dedicated parsers, so the binary-content guard must not drop them.
+	if !isParseableDocExt(strings.ToLower(filepath.Ext(path))) && isBinaryContent(content) {
 		log.Printf("Skipping binary file: %s", path)
 		return
 	}
@@ -2010,6 +2012,16 @@ func convertStringSlice(slice []string) []interface{} {
 		res[i] = v
 	}
 	return res
+}
+
+// isParseableDocExt reports whether the extension is a binary document format
+// that has a dedicated parser (PDF/Office), so it should bypass the binary guard.
+func isParseableDocExt(ext string) bool {
+	switch ext {
+	case ".pdf", ".doc", ".docx", ".xls", ".xlsx":
+		return true
+	}
+	return false
 }
 
 func isBinaryContent(content []byte) bool {

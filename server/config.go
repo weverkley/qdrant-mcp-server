@@ -270,6 +270,8 @@ func ParseCLIFlags(args []string) map[string]string {
 		"-lf":                  "LOG_TO_FILE",
 		"--search-mode":        "SEARCH_MODE",
 		"-sm":                  "SEARCH_MODE",
+		"--max-file-size":      "MAX_FILE_SIZE_BYTES",
+		"-mfs":                 "MAX_FILE_SIZE_BYTES",
 	}
 
 	for i := 0; i < len(args); i++ {
