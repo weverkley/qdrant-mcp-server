@@ -752,47 +752,89 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 		return DocumentNode{}, nil, fmt.Errorf("unsupported file type for chunking: %s", ext)
 	}
 
-	// Final purity gate: never let binary/markup noise reach embeddings.
-	content = cleanExtractedText(content)
-	if strings.TrimSpace(content) == "" {
-		return DocumentNode{}, nil, fmt.Errorf("file %s yielded no usable plain text after cleaning", filePath)
-	}
+	// Chunking knobs (env-overridable).
+	maxChunkChars := envInt("RAG_MAX_CHUNK_CHARS", 4000)        // hard upper bound per chunk
+	minChunkChars := envInt("RAG_MIN_CHUNK_CHARS", 800)         // merge small paragraphs up to this
+	overlapChars := envInt("RAG_CHUNK_OVERLAP_CHARS", 200)      // overlap when splitting big paragraphs
 
-	// Simple chunking strategy: split by paragraphs (double newline)
-	maxChunkChars := 4000
-	if envVal := os.Getenv("RAG_MAX_CHUNK_CHARS"); envVal != "" {
-		if n, err := strconv.Atoi(envVal); err == nil && n > 0 {
-			maxChunkChars = n
-		}
-	}
-	overlapChars := 200
-	if envVal := os.Getenv("RAG_CHUNK_OVERLAP_CHARS"); envVal != "" {
-		if n, err := strconv.Atoi(envVal); err == nil && n >= 0 {
-			overlapChars = n
-		}
-	}
+	// Readers insert \f between physical pages (PDF). Documents without real
+	// pagination (docx/xlsx) have none, so page numbers are reported as 0.
+	pages := strings.Split(content, "\f")
+	paginated := len(pages) > 1
 
-	paragraphs := strings.Split(content, "\n\n")
-	for i, p := range paragraphs {
-		trimmedP := strings.TrimSpace(p)
-		if trimmedP == "" {
+	for pageIdx, pageRaw := range pages {
+		cleaned := cleanExtractedText(pageRaw)
+		if strings.TrimSpace(cleaned) == "" {
 			continue
 		}
-		parts := splitIntoChunks(trimmedP, maxChunkChars, overlapChars)
-		for _, part := range parts {
+		pageNum := 0
+		if paginated {
+			pageNum = pageIdx + 1
+		}
+		// Merge small paragraphs and split oversized ones, then emit chunks.
+		for _, part := range mergeParagraphs(cleaned, minChunkChars, maxChunkChars, overlapChars) {
 			if !IsCleanText(part) {
 				continue
 			}
 			hash := sha256.Sum256([]byte(part))
 			chunks = append(chunks, ChunkNode{
 				Content:    part,
-				PageNumber: i + 1, // Placeholder for page number/paragraph number
+				PageNumber: pageNum,
 				Hash:       fmt.Sprintf("%x", hash),
 			})
 		}
 	}
 
+	if len(chunks) == 0 {
+		return DocumentNode{}, nil, fmt.Errorf("file %s yielded no usable plain text after cleaning", filePath)
+	}
+
 	return docNode, chunks, nil
+}
+
+// envInt reads a positive int from env or returns def.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// mergeParagraphs groups paragraphs (split on blank lines) into chunks of at
+// least minChars, never exceeding maxChars. Paragraphs larger than maxChars are
+// flushed then split with overlap. Prevents the over-fragmentation that turns a
+// table-heavy PDF into hundreds of two-word chunks.
+func mergeParagraphs(content string, minChars, maxChars, overlap int) []string {
+	var out []string
+	var buf strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(buf.String()); s != "" {
+			out = append(out, s)
+		}
+		buf.Reset()
+	}
+	for _, p := range strings.Split(content, "\n\n") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if len(p) > maxChars {
+			flush()
+			out = append(out, splitIntoChunks(p, maxChars, overlap)...)
+			continue
+		}
+		if buf.Len() > 0 {
+			buf.WriteString("\n\n")
+		}
+		buf.WriteString(p)
+		if buf.Len() >= minChars {
+			flush()
+		}
+	}
+	flush()
+	return out
 }
 
 // readPdf extracts text from a PDF file. It guards against panics inside the PDF parser.
@@ -809,33 +851,29 @@ func readPdf(path string) (content string, err error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Try library plain text first
-	if plainReader, err := r.GetPlainText(); err == nil {
-		if data, err := io.ReadAll(plainReader); err == nil {
-			if cleaned := cleanExtractedText(string(data)); cleaned != "" {
-				return cleaned, nil
-			}
-		}
-	}
-
-	// Fallback: row-based extraction.
+	// Primary: per-page row extraction so physical page boundaries are known.
+	// Pages are joined with \f (form feed); empty/null pages still emit a
+	// separator so downstream page numbers stay aligned with the document.
 	totalPage := r.NumPage()
-
-	var textBuilder strings.Builder
-	writeSpaceIfNeeded := func() {
-		if textBuilder.Len() == 0 {
-			return
-		}
-		last := textBuilder.String()[textBuilder.Len()-1]
-		if last != ' ' && last != '\n' && last != '\t' {
-			textBuilder.WriteByte(' ')
-		}
-	}
-
+	var doc strings.Builder
+	nonEmpty := false
 	for i := 1; i <= totalPage; i++ {
+		if i > 1 {
+			doc.WriteByte('\f')
+		}
 		p := r.Page(i)
 		if p.V.IsNull() {
 			continue
+		}
+		var page strings.Builder
+		writeSpaceIfNeeded := func() {
+			if page.Len() == 0 {
+				return
+			}
+			last := page.String()[page.Len()-1]
+			if last != ' ' && last != '\n' && last != '\t' {
+				page.WriteByte(' ')
+			}
 		}
 		rows, _ := p.GetTextByRow()
 		for _, row := range rows {
@@ -845,14 +883,26 @@ func readPdf(path string) (content string, err error) {
 					continue
 				}
 				writeSpaceIfNeeded()
-				textBuilder.WriteString(s)
+				page.WriteString(s)
 			}
-			textBuilder.WriteString("\n")
+			page.WriteString("\n")
 		}
-		textBuilder.WriteString("\n")
+		if strings.TrimSpace(page.String()) != "" {
+			nonEmpty = true
+		}
+		doc.WriteString(page.String())
+	}
+	if nonEmpty {
+		return doc.String(), nil
 	}
 
-	return cleanExtractedText(textBuilder.String()), nil
+	// Fallback: library plain text (loses page boundaries -> reported as page 0).
+	if plainReader, err := r.GetPlainText(); err == nil {
+		if data, err := io.ReadAll(plainReader); err == nil {
+			return string(data), nil
+		}
+	}
+	return "", nil
 }
 
 // checkSize ensures the file does not exceed the provided limit. Zero/negative disables check.

@@ -660,9 +660,9 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				"branch":         iw.Cfg.Branch,
 				"default_branch": iw.Cfg.DefaultBranch,
 			}
-			if chunk.PageNumber > 0 {
-				payload["page_number"] = int64(chunk.PageNumber)
-			}
+			// Always persist page_number for consistency; 0 means the format has
+			// no physical pagination (docx/xlsx).
+			payload["page_number"] = int64(chunk.PageNumber)
 
 			searchText := buildSearchText(chunk.Content, pointTags, symbolNames, namespace, "", relPath)
 			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
