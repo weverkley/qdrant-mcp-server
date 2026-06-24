@@ -3,6 +3,7 @@ package ast
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -156,11 +157,19 @@ This is paragraph 2. It has another sentence.
 		t.Errorf("expected doc type 'md', got %q", doc.Type)
 	}
 
-	if len(chunks) != 3 {
-		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	// Small paragraphs below the merge threshold are combined into a single
+	// chunk to avoid over-fragmentation.
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 merged chunk, got %d", len(chunks))
 	}
 
-	if chunks[1].Content != "This is paragraph 1. It contains some text that we want to parse." {
-		t.Errorf("unexpected content in chunk 1: %q", chunks[1].Content)
+	if !strings.Contains(chunks[0].Content, "This is paragraph 1. It contains some text that we want to parse.") ||
+		!strings.Contains(chunks[0].Content, "This is paragraph 2. It has another sentence.") {
+		t.Errorf("merged chunk missing expected paragraphs: %q", chunks[0].Content)
+	}
+
+	// Markdown has no physical pagination, so page number is reported as 0.
+	if chunks[0].PageNumber != 0 {
+		t.Errorf("expected page number 0 for non-paginated md, got %d", chunks[0].PageNumber)
 	}
 }
