@@ -624,6 +624,9 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		}
 	} else if isDocParsed {
 		for idx, chunk := range docChunks {
+			if !ast.IsCleanText(chunk.Content) {
+				continue
+			}
 			vector, err := iw.FetchRemoteEmbedding(ctx, chunk.Content)
 			if err != nil {
 				log.Printf("Ollama vectorization failed on document chunk %d of %s: %v", idx, path, err)
@@ -674,9 +677,18 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			})
 		}
 	} else {
-		// Fall back to basic sliding window line chunking
+		// Fall back to basic sliding window line chunking. Never raw-chunk binary
+		// or parseable-document formats: a failed parse must not dump file bytes
+		// (PDF streams, zip data) into embeddings as fake "text".
+		if isParseableDocExt(ext) || isBinaryContent(content) {
+			log.Printf("Skipping raw-byte fallback for %s: not plain text (parse failed or binary)", path)
+			return
+		}
 		chunks := iw.chunkText(string(content), 1000)
 		for idx, chunk := range chunks {
+			if !ast.IsCleanText(chunk) {
+				continue
+			}
 			vector, err := iw.FetchRemoteEmbedding(ctx, chunk)
 			if err != nil {
 				log.Printf("Ollama vectorization failed on remote endpoint: %v", err)

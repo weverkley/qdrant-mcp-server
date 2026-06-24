@@ -1,8 +1,10 @@
 package ast
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -688,13 +690,14 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 	var content string
 	var err error
 
-	// Size guardrails (overridable via env)
-	maxPDFBytes := getMaxBytesFromEnv("RAG_MAX_PDF_BYTES", 2*1024*1024)
-	maxTextBytes := getMaxBytesFromEnv("RAG_MAX_TEXT_BYTES", 2*1024*1024) // md/txt
-	maxCSVBytes := getMaxBytesFromEnv("RAG_MAX_CSV_BYTES", 2*1024*1024)   // csv
-	maxDocBytes := getMaxBytesFromEnv("RAG_MAX_DOC_BYTES", 2*1024*1024)   // doc/docx
-	maxXLSBytes := getMaxBytesFromEnv("RAG_MAX_XLS_BYTES", 2*1024*1024)   // xls/xlsx
-	maxBinaryText := maxDocBytes                                          // doc/docx share cap unless overridden separately
+	// Size guardrails. Base default follows MAX_FILE_SIZE_BYTES (the single
+	// user-facing knob); per-type RAG_MAX_* env vars override it individually.
+	baseMax := getMaxBytesFromEnv("MAX_FILE_SIZE_BYTES", 2*1024*1024)
+	maxPDFBytes := getMaxBytesFromEnv("RAG_MAX_PDF_BYTES", baseMax)
+	maxTextBytes := getMaxBytesFromEnv("RAG_MAX_TEXT_BYTES", baseMax) // md/txt
+	maxCSVBytes := getMaxBytesFromEnv("RAG_MAX_CSV_BYTES", baseMax)   // csv
+	maxDocBytes := getMaxBytesFromEnv("RAG_MAX_DOC_BYTES", baseMax)   // doc/docx
+	maxXLSBytes := getMaxBytesFromEnv("RAG_MAX_XLS_BYTES", baseMax)   // xls/xlsx
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
@@ -723,20 +726,36 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 		if err != nil {
 			return DocumentNode{}, nil, err
 		}
-	case ".xls", ".xlsx":
+	case ".xlsx":
 		docNode.Type = ext[1:]
-		content, err = readTextWithGuards(filePath, maxXLSBytes, true)
-		if err != nil {
+		if err := checkSize(filePath, maxXLSBytes); err != nil {
 			return DocumentNode{}, nil, err
 		}
-	case ".doc", ".docx":
-		docNode.Type = ext[1:]
-		content, err = readTextWithGuards(filePath, maxBinaryText, true)
+		content, err = readXlsx(filePath)
 		if err != nil {
+			return DocumentNode{}, nil, fmt.Errorf("failed to read XLSX file %s: %w", filePath, err)
+		}
+	case ".docx":
+		docNode.Type = ext[1:]
+		if err := checkSize(filePath, maxDocBytes); err != nil {
 			return DocumentNode{}, nil, err
 		}
+		content, err = readDocx(filePath)
+		if err != nil {
+			return DocumentNode{}, nil, fmt.Errorf("failed to read DOCX file %s: %w", filePath, err)
+		}
+	case ".doc", ".xls":
+		// Legacy binary OLE formats have no real parser here; raw-byte reads
+		// produce garbage, so refuse rather than ingest noise.
+		return DocumentNode{}, nil, fmt.Errorf("legacy binary format %s not supported (convert %s to %sx)", ext, ext, ext)
 	default:
 		return DocumentNode{}, nil, fmt.Errorf("unsupported file type for chunking: %s", ext)
+	}
+
+	// Final purity gate: never let binary/markup noise reach embeddings.
+	content = cleanExtractedText(content)
+	if strings.TrimSpace(content) == "" {
+		return DocumentNode{}, nil, fmt.Errorf("file %s yielded no usable plain text after cleaning", filePath)
 	}
 
 	// Simple chunking strategy: split by paragraphs (double newline)
@@ -761,6 +780,9 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 		}
 		parts := splitIntoChunks(trimmedP, maxChunkChars, overlapChars)
 		for _, part := range parts {
+			if !IsCleanText(part) {
+				continue
+			}
 			hash := sha256.Sum256([]byte(part))
 			chunks = append(chunks, ChunkNode{
 				Content:    part,
@@ -950,6 +972,137 @@ func cleanExtractedText(input string) string {
 
 func normalizeNewlines(input string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(input, "\r\n", "\n"), "\r", "\n")
+}
+
+// readDocx extracts plain text from a .docx (OOXML zip). It reads
+// word/document.xml and emits text content, turning paragraph and break
+// elements into newlines so chunking by paragraph works.
+func readDocx(path string) (string, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return "", fmt.Errorf("open docx zip: %w", err)
+	}
+	defer zr.Close()
+
+	var doc *zip.File
+	for _, f := range zr.File {
+		if f.Name == "word/document.xml" {
+			doc = f
+			break
+		}
+	}
+	if doc == nil {
+		return "", fmt.Errorf("word/document.xml not found in %s", path)
+	}
+
+	rc, err := doc.Open()
+	if err != nil {
+		return "", fmt.Errorf("open document.xml: %w", err)
+	}
+	defer rc.Close()
+
+	// Paragraph/break elements become newlines; tabs become spaces.
+	breakOn := map[string]bool{"p": true, "br": true, "cr": true}
+	spaceOn := map[string]bool{"tab": true}
+	return xmlText(rc, breakOn, spaceOn)
+}
+
+// readXlsx extracts plain text from a .xlsx (OOXML zip): shared strings plus
+// any inline string content across worksheets.
+func readXlsx(path string) (string, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return "", fmt.Errorf("open xlsx zip: %w", err)
+	}
+	defer zr.Close()
+
+	var b strings.Builder
+	readPart := func(f *zip.File) {
+		rc, err := f.Open()
+		if err != nil {
+			return
+		}
+		defer rc.Close()
+		// Each <t> string element ends a cell value -> newline separated.
+		if txt, err := xmlText(rc, map[string]bool{"t": true, "si": true, "row": true}, nil); err == nil && txt != "" {
+			b.WriteString(txt)
+			b.WriteString("\n")
+		}
+	}
+
+	for _, f := range zr.File {
+		name := f.Name
+		if name == "xl/sharedStrings.xml" ||
+			strings.HasPrefix(name, "xl/worksheets/") && strings.HasSuffix(name, ".xml") {
+			readPart(f)
+		}
+	}
+	return b.String(), nil
+}
+
+// xmlText streams an XML document and concatenates character data. Elements
+// whose local name is in breakOn emit a newline on close; those in spaceOn emit
+// a space. Unknown markup is discarded, so only real text survives.
+func xmlText(r io.Reader, breakOn, spaceOn map[string]bool) (string, error) {
+	dec := xml.NewDecoder(r)
+	dec.Strict = false
+	dec.Entity = xml.HTMLEntity
+	var b strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			b.Write(t)
+		case xml.StartElement:
+			if spaceOn != nil && spaceOn[t.Name.Local] {
+				b.WriteByte(' ')
+			}
+		case xml.EndElement:
+			if breakOn != nil && breakOn[t.Name.Local] {
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String(), nil
+}
+
+// IsCleanText reports whether s looks like genuine human-readable text rather
+// than binary/markup noise. Rejects empty strings, runs lacking letters, and
+// content with a high share of control or replacement characters.
+func IsCleanText(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	var letters, total, bad int
+	for _, r := range s {
+		total++
+		switch {
+		case r == utf8.RuneError || r == '�':
+			bad++
+		case unicode.IsControl(r) && r != '\n' && r != '\t' && r != '\r':
+			bad++
+		case unicode.IsLetter(r):
+			letters++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	// Need a meaningful share of letters and almost no binary noise.
+	if float64(letters)/float64(total) < 0.5 {
+		return false
+	}
+	if float64(bad)/float64(total) > 0.02 {
+		return false
+	}
+	return true
 }
 
 // mergeSoftLineBreaks treats single newlines as soft breaks (space) and preserves paragraph gaps.
