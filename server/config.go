@@ -184,8 +184,8 @@ func sliceContains(slice []string, match string) bool {
 }
 
 // PreprocessConfig parses command-line arguments for server configuration parameters
-// and auto-discovers configuration settings in files (.mcp.json, settings.local.json, etc.)
-// upward from the current directory, and user-level Claude settings.
+// and auto-discovers configuration settings in files (.mcp.json, settings.local.json,
+// .roo/mcp.json, etc.) upward from the current directory, and user-level Claude settings.
 // Variables set through CLI flags override shell environment variables, which in turn
 // override auto-discovered configuration file settings.
 func PreprocessConfig() {
@@ -227,14 +227,26 @@ func PreprocessConfig() {
 	if hasMissing {
 		discovered := discoverConfigs(cliEnvVars, shellEnvVars)
 		// Apply discovered variables to the environment ONLY if not set by CLI or Shell
-		for k, v := range discovered {
-			if _, byCLI := cliEnvVars[k]; !byCLI {
-				if _, byShell := shellEnvVars[k]; !byShell {
-					os.Setenv(k, v)
-				}
-			}
+		for k, v := range FilterDiscoveredEnv(discovered, cliEnvVars, shellEnvVars) {
+			os.Setenv(k, v)
 		}
 	}
+}
+
+// FilterDiscoveredEnv returns discovered keys that are not already set by CLI flags
+// or the shell environment (CLI > shell > discovered).
+func FilterDiscoveredEnv(discovered map[string]string, cliEnv map[string]string, shellEnv map[string]bool) map[string]string {
+	applied := make(map[string]string)
+	for k, v := range discovered {
+		if _, byCLI := cliEnv[k]; byCLI {
+			continue
+		}
+		if _, byShell := shellEnv[k]; byShell {
+			continue
+		}
+		applied[k] = v
+	}
+	return applied
 }
 
 func ParseCLIFlags(args []string) map[string]string {
@@ -309,49 +321,59 @@ func discoverConfigs(cliEnv map[string]string, shellEnv map[string]bool) map[str
 	// 2. Discover configs going upwards from current directory
 	cwd, err := os.Getwd()
 	if err == nil {
-		dir := cwd
-		for {
-			// Look for .mcp.json or mcp.json
-			mcpJsonPath := filepath.Join(dir, ".mcp.json")
-			if vars := LoadJsonConfig(mcpJsonPath); len(vars) > 0 {
-				mergeMaps(discovered, vars)
-				break
-			}
-			mcpJsonPath2 := filepath.Join(dir, "mcp.json")
-			if vars := LoadJsonConfig(mcpJsonPath2); len(vars) > 0 {
-				mergeMaps(discovered, vars)
-				break
-			}
-
-			// Look for .claude/settings.local.json
-			claudeLocalPath := filepath.Join(dir, ".claude", "settings.local.json")
-			if vars := LoadJsonConfig(claudeLocalPath); len(vars) > 0 {
-				mergeMaps(discovered, vars)
-				break
-			}
-
-			// Look for .codex/config.toml or config.toml
-			tomlPath := filepath.Join(dir, ".codex", "config.toml")
-			if vars := LoadTomlConfig(tomlPath); len(vars) > 0 {
-				mergeMaps(discovered, vars)
-				break
-			}
-			tomlPath2 := filepath.Join(dir, "config.toml")
-			if vars := LoadTomlConfig(tomlPath2); len(vars) > 0 {
-				mergeMaps(discovered, vars)
-				break
-			}
-
-			// Go to parent directory
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break // reached filesystem root
-			}
-			dir = parent
+		if vars := DiscoverProjectMCPEnv(cwd); len(vars) > 0 {
+			mergeMaps(discovered, vars)
 		}
 	}
 
 	return discovered
+}
+
+// DiscoverProjectMCPEnv walks from startDir upward and returns env vars from the first
+// project-level MCP config that yields a non-empty map. Candidates are checked in a
+// fixed order (not filesystem iteration order):
+//
+//  1. .mcp.json
+//  2. mcp.json
+//  3. .claude/settings.local.json
+//  4. .codex/config.toml
+//  5. config.toml
+//  6. .roo/mcp.json  (Roo Code / Zoo Code project MCP)
+func DiscoverProjectMCPEnv(startDir string) map[string]string {
+	dir := startDir
+	for {
+		if vars := loadProjectMCPEnvInDir(dir); len(vars) > 0 {
+			return vars
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return make(map[string]string)
+}
+
+// loadProjectMCPEnvInDir checks project MCP candidates in deterministic precedence order.
+func loadProjectMCPEnvInDir(dir string) map[string]string {
+	type candidate struct {
+		relPath string
+		loader  func(string) map[string]string
+	}
+	candidates := []candidate{
+		{".mcp.json", LoadJsonConfig},
+		{"mcp.json", LoadJsonConfig},
+		{filepath.Join(".claude", "settings.local.json"), LoadJsonConfig},
+		{filepath.Join(".codex", "config.toml"), LoadTomlConfig},
+		{"config.toml", LoadTomlConfig},
+		{filepath.Join(".roo", "mcp.json"), LoadJsonConfig},
+	}
+	for _, c := range candidates {
+		if vars := c.loader(filepath.Join(dir, c.relPath)); len(vars) > 0 {
+			return vars
+		}
+	}
+	return nil
 }
 
 func mergeMaps(dest, src map[string]string) {

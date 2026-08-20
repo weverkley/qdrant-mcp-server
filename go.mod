@@ -4,15 +4,18 @@ go 1.25.0
 
 require (
 	github.com/alecthomas/chroma/v2 v2.24.1
+	github.com/cucumber/gherkin/go/v42 v42.0.1
+	github.com/cucumber/messages/go/v34 v34.2.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/qdrant/go-client v1.18.1
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	github.com/yuin/goldmark v1.8.5
 )
 
 require (
 	github.com/dlclark/regexp2 v1.12.0 // indirect
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
-	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect

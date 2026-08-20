@@ -233,7 +233,7 @@ func printCLIHelp() {
 	fmt.Println("  evaluate-search                Ingest the workspace and run canned search quality checks.")
 	fmt.Println("  list-skills                    List all available AI agent skills.")
 	fmt.Println("  install-skill <agent> [dir]    Installs the rules file for the specified agent.")
-	fmt.Println("                                 Options: cursor, windsurf, cline, copilot, generic, codex, all.")
+	fmt.Println("                                 Options: cursor, windsurf, cline, copilot, generic, codex, roo, zoo, all.")
 	fmt.Println("  help, -h, --help               Show this help information.")
 	fmt.Println()
 	fmt.Println("\x1b[1;33mCommand-line Parameters / Flags:\x1b[0m")
