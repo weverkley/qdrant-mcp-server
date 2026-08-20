@@ -18,22 +18,23 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/qdrant/go-client/qdrant"
 
+	"qdrant-mcp-server/ast"
 	"qdrant-mcp-server/server"
 )
 
 type MockQdrantClient struct {
-	mu                 sync.Mutex
-	upsertCalls        [][]*qdrant.PointStruct
-	upsertErr          error
-	scrollResp         []*qdrant.RetrievedPoint
-	scrollErr          error
-	deleteCalls        []string
-	deletePointsCalls  []*qdrant.DeletePoints
-	queryCalls         []*qdrant.QueryPoints
-	queryResp          []*qdrant.ScoredPoint
-	queryErr           error
-	queryRespFn        func(*qdrant.QueryPoints) []*qdrant.ScoredPoint
-	setPayloadCalls    []*qdrant.SetPayloadPoints
+	mu                sync.Mutex
+	upsertCalls       [][]*qdrant.PointStruct
+	upsertErr         error
+	scrollResp        []*qdrant.RetrievedPoint
+	scrollErr         error
+	deleteCalls       []string
+	deletePointsCalls []*qdrant.DeletePoints
+	queryCalls        []*qdrant.QueryPoints
+	queryResp         []*qdrant.ScoredPoint
+	queryErr          error
+	queryRespFn       func(*qdrant.QueryPoints) []*qdrant.ScoredPoint
+	setPayloadCalls   []*qdrant.SetPayloadPoints
 }
 
 func (m *MockQdrantClient) Upsert(ctx context.Context, in *qdrant.UpsertPoints) (*qdrant.UpdateResult, error) {
@@ -282,6 +283,7 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		WatchDirectory:      os.TempDir(),
 		OllamaHost:          "http://localhost:11434",
 		EmbeddingModel:      "nomic-embed-text",
+		ParserMode:          "full",
 		MaxEmbeddingWorkers: 1,
 		BatchSize:           1,
 		BatchTimeout:        1 * time.Second,
@@ -302,6 +304,9 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 	}
 	worker.HTTPClient.Transport = mockHTTP
 
+	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
+	localFingerprint := ast.IngestFingerprint(content, tmpFile.Name(), Cfg.ParserMode, Cfg.EmbeddingModel)
+
 	// --- 1. First Ingestion (Empty Qdrant, should ingest) ---
 	mockClient.scrollResp = nil
 	worker.SyncFileState(context.Background(), tmpFile.Name())
@@ -319,17 +324,17 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 		t.Fatalf("Expected exactly 1 delete call to purge old vectors, got %d", initialDeleteCount)
 	}
 
-	// --- 2. Second Ingestion with matching hash (should skip) ---
+	// --- 2. Second Ingestion with matching fingerprint (should skip) ---
 	mockClient.mu.Lock()
 	mockClient.upsertCalls = nil
 	mockClient.deleteCalls = nil
 	mockClient.mu.Unlock()
 
-	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
 	mockClient.scrollResp = []*qdrant.RetrievedPoint{
 		{
 			Payload: map[string]*qdrant.Value{
-				"file_hash": qdrant.NewValueString(localHash),
+				"file_hash":          qdrant.NewValueString(localHash),
+				"ingest_fingerprint": qdrant.NewValueString(localFingerprint),
 			},
 		},
 	}
@@ -343,13 +348,13 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 	mockClient.mu.Unlock()
 
 	if skipUpsertCount != 0 {
-		t.Fatalf("Expected 0 upsert calls when hash matches, got %d", skipUpsertCount)
+		t.Fatalf("Expected 0 upsert calls when fingerprint matches, got %d", skipUpsertCount)
 	}
 	if skipDeleteCount != 0 {
-		t.Fatalf("Expected 0 delete calls when hash matches, got %d", skipDeleteCount)
+		t.Fatalf("Expected 0 delete calls when fingerprint matches, got %d", skipDeleteCount)
 	}
 
-	// --- 3. Third Ingestion with differing hash (should re-ingest) ---
+	// --- 3. Legacy points with only file_hash (should re-ingest once) ---
 	mockClient.mu.Lock()
 	mockClient.upsertCalls = nil
 	mockClient.deleteCalls = nil
@@ -358,7 +363,37 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 	mockClient.scrollResp = []*qdrant.RetrievedPoint{
 		{
 			Payload: map[string]*qdrant.Value{
-				"file_hash": qdrant.NewValueString("some-stale-hash"),
+				"file_hash": qdrant.NewValueString(localHash),
+			},
+		},
+	}
+
+	worker.SyncFileState(context.Background(), tmpFile.Name())
+	worker.BatchUpserter.Flush()
+
+	mockClient.mu.Lock()
+	legacyUpsertCount := len(mockClient.upsertCalls)
+	legacyDeleteCount := len(mockClient.deleteCalls)
+	mockClient.mu.Unlock()
+
+	if legacyUpsertCount != 1 {
+		t.Fatalf("Expected 1 upsert call for legacy points without fingerprint, got %d", legacyUpsertCount)
+	}
+	if legacyDeleteCount != 1 {
+		t.Fatalf("Expected 1 delete call for legacy points without fingerprint, got %d", legacyDeleteCount)
+	}
+
+	// --- 4. Stale fingerprint (should re-ingest) ---
+	mockClient.mu.Lock()
+	mockClient.upsertCalls = nil
+	mockClient.deleteCalls = nil
+	mockClient.mu.Unlock()
+
+	mockClient.scrollResp = []*qdrant.RetrievedPoint{
+		{
+			Payload: map[string]*qdrant.Value{
+				"file_hash":          qdrant.NewValueString(localHash),
+				"ingest_fingerprint": qdrant.NewValueString("stale-parser-fingerprint"),
 			},
 		},
 	}
@@ -372,10 +407,10 @@ func TestSyncFileState_ContentHashing(t *testing.T) {
 	mockClient.mu.Unlock()
 
 	if staleUpsertCount != 1 {
-		t.Fatalf("Expected 1 upsert call when hash does not match, got %d", staleUpsertCount)
+		t.Fatalf("Expected 1 upsert call when fingerprint does not match, got %d", staleUpsertCount)
 	}
 	if staleDeleteCount != 1 {
-		t.Fatalf("Expected 1 delete call when hash does not match, got %d", staleDeleteCount)
+		t.Fatalf("Expected 1 delete call when fingerprint does not match, got %d", staleDeleteCount)
 	}
 }
 

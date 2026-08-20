@@ -6,7 +6,7 @@
 
 A high-performance **Model Context Protocol (MCP)** server written in Go that acts as a real-time Retrieval-Augmented Generation (RAG) agent for your codebases. 
 
-This server recursively monitors your local files, auto-indexes changes in real-time using **Ollama** embeddings, stores them in a remote/local **Qdrant** vector database, and exposes a semantic vector search tool (`qdrant_search`) to your AI assistants (like Claude Desktop, Cursor, Windsurf, or Zed).
+This server recursively monitors your local files, auto-indexes changes in real-time using **Ollama** embeddings, stores them in a remote/local **Qdrant** vector database, and exposes a semantic vector search tool (`qdrant_search`) to your AI assistants (like Claude Desktop, Cursor, Windsurf, Zed, Roo Code, or Zoo Code).
 
 ---
 
@@ -49,13 +49,15 @@ graph TD
 
 ## ✨ Key Features
 
-- **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, and Python to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching. Covers a broad set of grammar variants per language — including arrow functions, interface/type-alias/enum declarations (TypeScript), record/enum types (C#), interface/trait declarations (PHP), and file-scoped namespaces (C# 10+). Previously parsed trees are cached per file so re-indexing on save only re-parses changed AST branches (incremental tree reuse).
+- **🧠 AST-Aware Code Intelligence:** Uses tree-sitter AST parsers for Go, JavaScript, TypeScript, PHP, C#, Python, Rust, C, and C++ to extract and embed precise function blocks, capturing receivers, signatures, and exact line maps (`start_line`/`end_line`) for deep semantic code searching. Covers a broad set of grammar variants per language — including arrow functions, interface/type-alias/enum declarations (TypeScript), record/enum types (C#), interface/trait declarations (PHP), Rust `impl`/`trait` methods and `use` imports, C/C++ structs/classes/namespaces/includes and header declarations, and file-scoped namespaces (C# 10+). Previously parsed trees are cached per file so re-indexing on save only re-parses changed AST branches (incremental tree reuse).
 - **⚡ Concurrent Rate-Limited Ingestion:** Accelerates workspace indexing by walking and parsing files concurrently using Goroutines and `sync.WaitGroup` while preventing Ollama server overload via a configurable buffered semaphore pool (`MAX_EMBEDDING_WORKERS`).
 - **⚡ Real-Time Indexing:** Uses OS-level file notifications (`fsnotify`) to watch your code workspace recursively. Any write, create, or delete operation immediately reflects in your vector database.
 - **🛡️ Intelligent Ignoring & Filters:** Automatically respects your `.gitignore` files recursively across the workspace, skipping untracked files and folders (like build artifacts or node modules) instantly during crawling and watch events. Also includes fallback configuration parameters to strictly exclude additional folders or whitelist particular hidden directories.
 - **⏱️ Debounced Processing:** Features a configurable debounce duration (defaulting to 800ms) to ensure file saving sequences or git pulls do not thrash system/network resources.
 - **🧠 Local Embeddings:** Harnesses **Ollama** embeddings (`/api/embeddings`) for localized, high-speed, and secure code representation.
 - **⚡ Supercharged gRPC Storage:** Communicates with your **Qdrant** instance using native Go gRPC clients for ultra-low latency index operations.
+- **📄 Structure-Aware Documents:** Markdown (`.md` / `.markdown`) is chunked by heading hierarchy (with YAML frontmatter support). Gherkin/Cucumber (`.feature`) is chunked per Scenario, preserving Feature/Rule/Background context, tags, Examples, data tables, and doc strings. Payload field `source_kind` distinguishes `code`, `markdown`, `gherkin`, `document`, and `generic`.
+- **🔁 Parser-Aware Reindexing:** Incremental skip uses an `ingest_fingerprint` (file bytes + parser strategy version + `PARSER_MODE` + chunk knobs + embedding model), so parser upgrades reindex affected files without bumping an app-wide version. Content-only `file_hash` is still stored for debugging.
 - **🤖 Protocol Compliant:** Implements the latest **Model Context Protocol** spec. Keeps all internal execution logs redirected to `stderr` so that stdout is strictly reserved for clean JSON-RPC communication.
 
 ---
@@ -128,13 +130,25 @@ The `qdrant-mcp-server` binary itself is a highly functional command-line tool. 
 This is especially helpful when indexing extremely large codebases for the first time, as doing it in the background can sometimes feel slow or resource-intensive.
 
 ### ⏱️ Auto-Discovery & Zero-Config CLI
-When running CLI subcommands (like `ingest`), the server automatically looks up your existing agent environment variables by searching upwards from the current working directory for configuration files:
-- `.mcp.json` / `mcp.json`
-- `.claude/settings.local.json`
-- `.codex/config.toml` / `config.toml`
+When running CLI subcommands (like `ingest`), the server automatically looks up your existing agent environment variables by searching upwards from the current working directory for configuration files. Candidates in each directory are checked in this **deterministic order** (first match with a Qdrant MCP `env` block wins):
 
-It also checks your user-level Claude settings file:
+1. `.mcp.json`
+2. `mcp.json`
+3. `.claude/settings.local.json`
+4. `.codex/config.toml`
+5. `config.toml`
+6. `.roo/mcp.json` (Roo Code and Zoo Code project MCP)
+
+It also checks your user-level Claude settings file first (lowest priority among discovered sources once a project file is found):
+
 - `~/.claude/settings.json`
+
+**Config precedence:**
+
+`CLI flags > shell environment > auto-discovered MCP files > built-in defaults`
+
+> [!NOTE]
+> Roo Code and Zoo Code also support a **global** MCP settings file (`mcp_settings.json` in the extension’s VS Code `globalStorage`). Absolute paths vary by editor host (VS Code / Cursor / Insiders) and optional custom storage settings, so this server does **not** auto-discover those global files. Prefer project-local `.roo/mcp.json`.
 
 If it finds one of these configurations, it automatically parses it and loads the configured environment variables (like `QDRANT_COLLECTION`, `WATCH_DIRECTORY`, `OLLAMA_HOST`, and `EMBEDDING_MODEL`) into the active session. This means you can run manual ingestions inside your project folder with **zero manual configuration**!
 
@@ -174,7 +188,7 @@ qdrant-mcp-server ingest -c my-collection -w ./ -o http://172.20.0.5:11434 -e no
 
 ## 🎓 Installing Agent Skills
 
-To help your AI agent (like Cursor, Windsurf, Cline, or Copilot) understand when and how to use the semantic search capabilities, you can install specialized **skills** (rules files) directly into your workspace.
+To help your AI agent (like Cursor, Windsurf, Cline, Copilot, Roo Code, or Zoo Code) understand when and how to use the semantic search capabilities, you can install specialized **skills** (rules files) directly into your workspace.
 
 Run the compiled server binary with the `list-skills` and `install-skill` subcommands:
 
@@ -198,7 +212,13 @@ Install the rules directly in your active project's root folder:
 # Install Codex instructions (.codex/mcp-instructions.md)
 ./qdrant-mcp-server install-skill codex
 
-# Install ALL supported agent skills at once
+# Install Roo Code rules (.roo/rules/qdrant-rag.md)
+./qdrant-mcp-server install-skill roo
+
+# Install Zoo Code rules (same path: .roo/rules/qdrant-rag.md)
+./qdrant-mcp-server install-skill zoo
+
+# Install ALL supported agent skills at once (includes roo and zoo)
 ./qdrant-mcp-server install-skill all
 ```
 
@@ -206,6 +226,8 @@ You can also specify a custom target path as the last parameter:
 ```bash
 ./qdrant-mcp-server install-skill cursor /absolute/path/to/my-project
 ```
+
+Re-running `install-skill` for the same agent is idempotent: identical content is not duplicated.
 
 ---
 
@@ -248,6 +270,49 @@ Add the following block to your `claude_desktop_config.json` (typically located 
 6. Provide the command: `/usr/local/bin/qdrant-mcp-server` (update this path to match your installation path: `/usr/local/bin/qdrant-mcp-server`, `/home/<username>/.local/bin/qdrant-mcp-server`, or `/home/<username>/bin/qdrant-mcp-server` depending on how you installed or built it).
 7. Configure the environment variables list as shown in the JSON schema above.
 
+### Roo Code & Zoo Code Integration
+
+[Roo Code](https://docs.roocode.com/features/mcp/using-mcp-in-roo) and [Zoo Code](https://docs.zoocode.dev/features/mcp/using-mcp-in-roo) are MCP clients that share the same project-local MCP file today:
+
+```text
+.roo/mcp.json
+```
+
+Zoo Code continues the Roo Code layout (`.roo/`), not a separate `.zoo/` MCP path. Both clients use the shared project RAG service — one Qdrant collection for the workspace, not per-client indexes.
+
+Minimal project config example:
+
+```json
+{
+  "mcpServers": {
+    "qdrant-rag": {
+      "command": "qdrant-mcp-server",
+      "args": [],
+      "env": {
+        "QDRANT_HOST": "127.0.0.1",
+        "QDRANT_PORT": "6334",
+        "QDRANT_COLLECTION": "my-codebase-collection",
+        "WATCH_DIRECTORY": "/absolute/path/to/my-project",
+        "OLLAMA_HOST": "http://127.0.0.1:11434",
+        "EMBEDDING_MODEL": "nomic-embed-text",
+        "PARSER_MODE": "full",
+        "SEARCH_MODE": "hybrid"
+      }
+    }
+  }
+}
+```
+
+Install agent rules so Roo/Zoo know when to call RAG:
+
+```bash
+./qdrant-mcp-server install-skill roo
+# or
+./qdrant-mcp-server install-skill zoo
+```
+
+Both write `.roo/rules/qdrant-rag.md` (Zoo still loads workspace rules from `.roo/rules/`).
+
 ---
 
 ## 📚 Codex / Knowledge Base Setup
@@ -271,7 +336,9 @@ Simply append your documentation directory to the `INCLUDE_HIDDEN_DIRS` variable
 ```
 
 ### 🧠 Benefits of indexing your Codex
-Once configured, the MCP server automatically chunks and indexes your `.codex/*.md` documentation alongside your codebase. Your AI coding assistants can use the `qdrant_search` tool to:
+Once configured, the MCP server automatically indexes your `.codex/*.md` documentation alongside your codebase using **structure-aware Markdown chunking** (heading hierarchy, frontmatter metadata, fenced code kept with its section). Behavioral specs in `.feature` files are indexed per Scenario (with Feature/Rule/Background context and tags). Gherkin localization via `# language:` is supported by the parser library; default examples use English keywords.
+
+Your AI coding assistants can use the `qdrant_search` tool to:
 * **Lookup Internal Design Guides:** *"Find the guidelines for writing telemetry logs."*
 * **Retrieve Architecture Schemas:** *"What is the database connection strategy documented in the wiki?"*
 * **Reference Feature Specifications:** *"How should the new user-onboarding flows behave according to our Codex specs?"*

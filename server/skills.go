@@ -55,6 +55,18 @@ var AvailableSkills = []Skill{
 		Description: "Codex instructions (.codex/mcp-instructions.md)",
 		EmbedPath:   "skills/codex.md",
 	},
+	{
+		Key:         "roo",
+		Filename:    ".roo/rules/qdrant-rag.md",
+		Description: "Roo Code rules (.roo/rules/qdrant-rag.md)",
+		EmbedPath:   "skills/roo.md",
+	},
+	{
+		Key:         "zoo",
+		Filename:    ".roo/rules/qdrant-rag.md",
+		Description: "Zoo Code rules (.roo/rules/qdrant-rag.md)",
+		EmbedPath:   "skills/roo.md",
+	},
 }
 
 // ListSkills outputs the supported agents and files they generate in a styled, premium layout
@@ -120,13 +132,18 @@ func installOneSkill(skill Skill, destDir string) error {
 
 	targetPath := filepath.Join(destDir, skill.Filename)
 
-	// Ensure parent directory exists (e.g. .github/)
+	// Ensure parent directory exists (e.g. .github/, .roo/rules/)
 	parentDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory tree %s: %w", parentDir, err)
 	}
 
-	// Write skill file
+	// Idempotent: skip rewrite when content already matches
+	if existing, err := os.ReadFile(targetPath); err == nil && string(existing) == string(data) {
+		fmt.Printf("✅ Already installed \x1b[1;32m%s\x1b[0m -> \x1b[1;34m%s\x1b[0m\n", skill.Key, targetPath)
+		return nil
+	}
+
 	if err := os.WriteFile(targetPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write skill file %s: %w", targetPath, err)
 	}

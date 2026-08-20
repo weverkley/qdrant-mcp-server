@@ -19,11 +19,14 @@ import (
 
 	"github.com/ledongthuc/pdf"
 	sitter "github.com/smacker/go-tree-sitter"
+	sitterc "github.com/smacker/go-tree-sitter/c"
+	sittercpp "github.com/smacker/go-tree-sitter/cpp"
 	sittercsharp "github.com/smacker/go-tree-sitter/csharp"
 	sittergo "github.com/smacker/go-tree-sitter/golang"
 	sitterjs "github.com/smacker/go-tree-sitter/javascript"
 	sitterphp "github.com/smacker/go-tree-sitter/php"
 	sitterpy "github.com/smacker/go-tree-sitter/python"
+	sitterrust "github.com/smacker/go-tree-sitter/rust"
 	sitterts "github.com/smacker/go-tree-sitter/typescript/typescript"
 )
 
@@ -33,6 +36,7 @@ type languageInfo struct {
 }
 
 // languageForExt selects a tree-sitter language based on file extension.
+// .h defaults to C (no content-aware C vs C++ detection); use .hpp/.hh/.hxx for C++ headers.
 func languageForExt(ext string) languageInfo {
 	switch ext {
 	case ".go":
@@ -47,6 +51,12 @@ func languageForExt(ext string) languageInfo {
 		return languageInfo{lang: sittercsharp.GetLanguage(), key: "csharp"}
 	case ".py":
 		return languageInfo{lang: sitterpy.GetLanguage(), key: "python"}
+	case ".rs":
+		return languageInfo{lang: sitterrust.GetLanguage(), key: "rust"}
+	case ".c", ".h":
+		return languageInfo{lang: sitterc.GetLanguage(), key: "c"}
+	case ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx":
+		return languageInfo{lang: sittercpp.GetLanguage(), key: "cpp"}
 	default:
 		return languageInfo{}
 	}
@@ -108,6 +118,31 @@ var metadataQuerySpecs = map[string][]queryPatternSpec{
 		{name: "type_trait", pattern: `(trait_declaration name: (name) @type.name)`},
 		{name: "import", pattern: `(namespace_use_declaration (namespace_use_clause name: (_) @import.path))`},
 	},
+	"rust": {
+		{name: "type_struct", pattern: `(struct_item name: (type_identifier) @type.name)`},
+		{name: "type_enum", pattern: `(enum_item name: (type_identifier) @type.name)`},
+		{name: "type_trait", pattern: `(trait_item name: (type_identifier) @type.name)`},
+		{name: "type_alias", pattern: `(type_item name: (type_identifier) @type.name)`},
+		{name: "namespace", pattern: `(mod_item name: (identifier) @namespace)`},
+		{name: "import", pattern: `(use_declaration argument: (_) @import.path)`},
+	},
+	"c": {
+		{name: "type_struct", pattern: `(struct_specifier name: (type_identifier) @type.name)`},
+		{name: "type_union", pattern: `(union_specifier name: (type_identifier) @type.name)`},
+		{name: "type_enum", pattern: `(enum_specifier name: (type_identifier) @type.name)`},
+		{name: "type_typedef", pattern: `(type_definition declarator: (type_identifier) @type.name)`},
+		{name: "import", pattern: `(preproc_include path: (_) @import.path)`},
+	},
+	"cpp": {
+		{name: "type_class", pattern: `(class_specifier name: (type_identifier) @type.name)`},
+		{name: "type_struct", pattern: `(struct_specifier name: (type_identifier) @type.name)`},
+		{name: "type_union", pattern: `(union_specifier name: (type_identifier) @type.name)`},
+		{name: "type_enum", pattern: `(enum_specifier name: (type_identifier) @type.name)`},
+		{name: "type_alias", pattern: `(alias_declaration name: (type_identifier) @type.name)`},
+		{name: "type_typedef", pattern: `(type_definition declarator: (type_identifier) @type.name)`},
+		{name: "namespace", pattern: `(namespace_definition name: (_) @namespace)`},
+		{name: "import", pattern: `(preproc_include path: (_) @import.path)`},
+	},
 }
 
 var functionQuerySpecs = map[string][]queryPatternSpec{
@@ -135,6 +170,40 @@ var functionQuerySpecs = map[string][]queryPatternSpec{
 	"python": {
 		{name: "function", pattern: `(function_definition name: (identifier) @func.name) @func.node`},
 	},
+	"rust": {
+		{name: "function", pattern: `(function_item name: (identifier) @func.name) @func.node`},
+		{name: "function_signature", pattern: `(function_signature_item name: (identifier) @func.name) @func.node`},
+	},
+	"c": {
+		{name: "function", pattern: `(function_definition declarator: (function_declarator declarator: (identifier) @func.name)) @func.node`},
+		{name: "function_ptr", pattern: `(function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "function_ptr2", pattern: `(function_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name)))) @func.node`},
+		{name: "declaration", pattern: `(declaration declarator: (function_declarator declarator: (identifier) @func.name)) @func.node`},
+		{name: "declaration_ptr", pattern: `(declaration declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "declaration_ptr2", pattern: `(declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name)))) @func.node`},
+	},
+	"cpp": {
+		{name: "function", pattern: `(function_definition declarator: (function_declarator declarator: (identifier) @func.name)) @func.node`},
+		{name: "method", pattern: `(function_definition declarator: (function_declarator declarator: (field_identifier) @func.name)) @func.node`},
+		{name: "destructor", pattern: `(function_definition declarator: (function_declarator declarator: (destructor_name) @func.name)) @func.node`},
+		{name: "qualified", pattern: `(function_definition declarator: (function_declarator declarator: (qualified_identifier) @func.name)) @func.node`},
+		{name: "function_ptr", pattern: `(function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "function_ptr_field", pattern: `(function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @func.name))) @func.node`},
+		{name: "function_ptr_qualified", pattern: `(function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (qualified_identifier) @func.name))) @func.node`},
+		{name: "function_ptr2", pattern: `(function_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name)))) @func.node`},
+		{name: "function_ref", pattern: `(function_definition declarator: (reference_declarator (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "function_ref_qualified", pattern: `(function_definition declarator: (reference_declarator (function_declarator declarator: (qualified_identifier) @func.name))) @func.node`},
+		{name: "declaration", pattern: `(declaration declarator: (function_declarator declarator: (identifier) @func.name)) @func.node`},
+		{name: "declaration_field", pattern: `(declaration declarator: (function_declarator declarator: (field_identifier) @func.name)) @func.node`},
+		{name: "declaration_dtor", pattern: `(declaration declarator: (function_declarator declarator: (destructor_name) @func.name)) @func.node`},
+		{name: "declaration_qualified", pattern: `(declaration declarator: (function_declarator declarator: (qualified_identifier) @func.name)) @func.node`},
+		{name: "declaration_ptr", pattern: `(declaration declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "declaration_ptr_qualified", pattern: `(declaration declarator: (pointer_declarator declarator: (function_declarator declarator: (qualified_identifier) @func.name))) @func.node`},
+		{name: "declaration_ref", pattern: `(declaration declarator: (reference_declarator (function_declarator declarator: (identifier) @func.name))) @func.node`},
+		{name: "field_declaration", pattern: `(field_declaration declarator: (function_declarator declarator: (field_identifier) @func.name)) @func.node`},
+		{name: "field_declaration_id", pattern: `(field_declaration declarator: (function_declarator declarator: (identifier) @func.name)) @func.node`},
+		{name: "field_declaration_dtor", pattern: `(field_declaration declarator: (function_declarator declarator: (destructor_name) @func.name)) @func.node`},
+	},
 }
 
 func languageLabel(ext string) string {
@@ -151,6 +220,12 @@ func languageLabel(ext string) string {
 		return "csharp"
 	case ".py":
 		return "python"
+	case ".rs":
+		return "rust"
+	case ".c", ".h":
+		return "c"
+	case ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx":
+		return "cpp"
 	default:
 		return "unknown"
 	}
@@ -231,6 +306,12 @@ func ParseCodeToDocsWithMeta(ctx context.Context, filePath string, fileContent [
 				namespace = firstNonEmptyString(queryMeta.Namespace, parseCSharpNamespace(string(fileContent)))
 			case "python":
 				imports = chooseImportFallback(queryMeta.Imports, parsePythonImports(string(fileContent)))
+				namespace = queryMeta.Namespace
+			case "rust":
+				imports = chooseImportFallback(queryMeta.Imports, parseRustImports(string(fileContent)))
+				namespace = queryMeta.Namespace
+			case "c", "cpp":
+				imports = chooseImportFallback(queryMeta.Imports, parseCIncludes(string(fileContent)))
 				namespace = queryMeta.Namespace
 			}
 			types = uniqueStrings(queryMeta.Types)
@@ -339,6 +420,11 @@ func buildFunctionFromMatch(info languageInfo, query *sitter.Query, match *sitte
 		return nil
 	}
 
+	name, qualifiedContainer := resolveDeclaratorName(nameNode, content)
+	if name == "" {
+		return nil
+	}
+
 	receiver := ""
 	container := ""
 	if receiverNode != nil {
@@ -346,18 +432,130 @@ func buildFunctionFromMatch(info languageInfo, query *sitter.Query, match *sitte
 		container = receiverTypeName(receiver)
 	}
 	if container == "" {
+		container = qualifiedContainer
+	}
+	if container == "" {
 		container = findContainingTypeName(fnNode, content)
 	}
 
 	return &FunctionNode{
-		Name:      strings.TrimSpace(nameNode.Content(content)),
+		Name:      name,
 		Signature: string(content[fnNode.StartByte():fnNode.EndByte()]),
 		StartLine: int(fnNode.StartPoint().Row) + 1,
 		EndLine:   int(fnNode.EndPoint().Row) + 1,
 		Receiver:  receiver,
 		Container: container,
 		Namespace: namespace,
+		Calls:     extractCallRefs(fnNode, content),
 	}
+}
+
+// resolveDeclaratorName extracts a function/method name and optional container
+// from C/C++ declarator name nodes (identifier, field_identifier, destructor_name,
+// qualified_identifier).
+func resolveDeclaratorName(nameNode *sitter.Node, content []byte) (name, container string) {
+	if nameNode == nil {
+		return "", ""
+	}
+	switch nameNode.Type() {
+	case "qualified_identifier":
+		return resolveQualifiedDeclarator(nameNode, content)
+	case "destructor_name":
+		return "~" + innermostIdentifierName(nameNode, content), findContainingTypeName(nameNode, content)
+	case "identifier", "field_identifier", "type_identifier":
+		return strings.TrimSpace(nameNode.Content(content)), ""
+	default:
+		// Captured node may already be the leaf; also handle parent qualified wrappers.
+		if parent := nameNode.Parent(); parent != nil && parent.Type() == "qualified_identifier" {
+			return resolveQualifiedDeclarator(parent, content)
+		}
+		if parent := nameNode.Parent(); parent != nil && parent.Type() == "destructor_name" {
+			return "~" + strings.TrimSpace(nameNode.Content(content)), findContainingTypeName(parent, content)
+		}
+		return strings.TrimSpace(nameNode.Content(content)), ""
+	}
+}
+
+func resolveQualifiedDeclarator(node *sitter.Node, content []byte) (name, container string) {
+	if node == nil {
+		return "", ""
+	}
+	// Walk nested qualified_identifier to the innermost name.
+	current := node
+	var scopes []string
+	for current != nil && current.Type() == "qualified_identifier" {
+		if scopeNode := current.ChildByFieldName("scope"); scopeNode != nil {
+			scopes = append(scopes, strings.TrimSpace(scopeNode.Content(content)))
+		}
+		nameChild := current.ChildByFieldName("name")
+		if nameChild == nil {
+			break
+		}
+		if nameChild.Type() == "qualified_identifier" {
+			current = nameChild
+			continue
+		}
+		if nameChild.Type() == "destructor_name" {
+			name = "~" + innermostIdentifierName(nameChild, content)
+		} else {
+			name = strings.TrimSpace(nameChild.Content(content))
+		}
+		break
+	}
+	if len(scopes) > 0 {
+		// Immediate type/class scope is the last segment (Engine in din::Engine::start).
+		container = scopes[len(scopes)-1]
+	}
+	return name, container
+}
+
+func innermostIdentifierName(node *sitter.Node, content []byte) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type() == "identifier" || node.Type() == "field_identifier" || node.Type() == "type_identifier" {
+		return strings.TrimSpace(node.Content(content))
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "identifier" || child.Type() == "field_identifier" || child.Type() == "type_identifier" {
+			return strings.TrimSpace(child.Content(content))
+		}
+	}
+	return strings.TrimSpace(node.Content(content))
+}
+
+func extractCallRefs(fnNode *sitter.Node, content []byte) []CallRef {
+	if fnNode == nil {
+		return nil
+	}
+	var calls []CallRef
+	seen := make(map[string]struct{})
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type() == "call_expression" {
+			if fn := node.ChildByFieldName("function"); fn != nil {
+				name := strings.TrimSpace(fn.Content(content))
+				if name != "" {
+					if _, exists := seen[name]; !exists {
+						seen[name] = struct{}{}
+						calls = append(calls, CallRef{Name: name})
+					}
+				}
+			}
+		}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+	walk(fnNode)
+	return calls
 }
 
 func parseGoPackage(content string) string {
@@ -514,6 +712,7 @@ func loadQuery(info languageInfo, spec queryPatternSpec) (*sitter.Query, error) 
 func normalizeCapturedLiteral(raw string) string {
 	raw = strings.TrimSpace(raw)
 	raw = strings.Trim(raw, "\"`'")
+	raw = strings.Trim(raw, "<>")
 	return strings.TrimSpace(raw)
 }
 
@@ -560,7 +759,8 @@ func firstNonEmptyString(values ...string) string {
 func findContainingTypeName(node *sitter.Node, content []byte) string {
 	for current := node.Parent(); current != nil; current = current.Parent() {
 		switch current.Type() {
-		case "class_declaration", "interface_declaration", "struct_declaration", "class_definition", "class", "type_spec":
+		case "class_declaration", "interface_declaration", "struct_declaration", "class_definition", "class", "type_spec", "trait_item",
+			"class_specifier", "struct_specifier", "union_specifier":
 			nameNode := current.ChildByFieldName("name")
 			if nameNode != nil {
 				name := strings.TrimSpace(nameNode.Content(content))
@@ -568,9 +768,35 @@ func findContainingTypeName(node *sitter.Node, content []byte) string {
 					return name
 				}
 			}
+		case "impl_item":
+			typeNode := current.ChildByFieldName("type")
+			if name := rustTypeNodeName(typeNode, content); name != "" {
+				return name
+			}
 		}
 	}
 	return ""
+}
+
+// rustTypeNodeName extracts a usable type name from a Rust type AST node
+// (type_identifier, scoped_type_identifier, generic_type, etc.).
+func rustTypeNodeName(node *sitter.Node, content []byte) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Type() {
+	case "type_identifier", "identifier":
+		return strings.TrimSpace(node.Content(content))
+	case "scoped_type_identifier":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			return strings.TrimSpace(nameNode.Content(content))
+		}
+	case "generic_type":
+		if inner := node.ChildByFieldName("type"); inner != nil {
+			return rustTypeNodeName(inner, content)
+		}
+	}
+	return strings.TrimSpace(node.Content(content))
 }
 
 func parseGoImports(content string) []ImportRef {
@@ -667,6 +893,37 @@ func parsePythonImports(content string) []ImportRef {
 	return imports
 }
 
+func parseRustImports(content string) []ImportRef {
+	var imports []ImportRef
+	re := regexp.MustCompile(`(?m)^\s*use\s+(.+?)\s*;`)
+	for _, match := range re.FindAllStringSubmatch(content, -1) {
+		if len(match) > 1 {
+			path := strings.TrimSpace(match[1])
+			if path == "" {
+				continue
+			}
+			imports = append(imports, ImportRef{RawPath: path})
+		}
+	}
+	return imports
+}
+
+func parseCIncludes(content string) []ImportRef {
+	var imports []ImportRef
+	re := regexp.MustCompile(`(?m)^\s*#\s*include\s*([<"][^>"]+[>"])`)
+	for _, match := range re.FindAllStringSubmatch(content, -1) {
+		if len(match) > 1 {
+			path := strings.TrimSpace(match[1])
+			path = strings.Trim(path, `<>"`)
+			if path == "" {
+				continue
+			}
+			imports = append(imports, ImportRef{RawPath: path})
+		}
+	}
+	return imports
+}
+
 // DocumentNode represents a text document.
 type DocumentNode struct {
 	Path    string `json:"path"`
@@ -681,84 +938,145 @@ type ChunkNode struct {
 	PageNumber int       `json:"page_number,omitempty"` // For PDF documents
 	Hash       string    `json:"hash"`                  // Unique hash of content for deduplication
 	Session    string    `json:"session,omitempty"`
+
+	// Structured document metadata (markdown / gherkin). Zero-value safe for
+	// paragraph-chunked formats (pdf/txt/csv/office).
+	SourceKind   string   `json:"source_kind,omitempty"` // "markdown" | "gherkin" | ""
+	Heading      string   `json:"heading,omitempty"`
+	HeadingPath  []string `json:"heading_path,omitempty"`
+	HeadingLevel int      `json:"heading_level,omitempty"`
+	StartLine    int      `json:"start_line,omitempty"`
+	EndLine      int      `json:"end_line,omitempty"`
+	Feature      string   `json:"feature,omitempty"`
+	Rule         string   `json:"rule,omitempty"`
+	Scenario     string   `json:"scenario,omitempty"`
+	FeatureTags  []string `json:"feature_tags,omitempty"`
+	ScenarioTags []string `json:"scenario_tags,omitempty"`
+	Title        string   `json:"title,omitempty"`     // frontmatter title or Feature name
+	MetaTags     []string `json:"meta_tags,omitempty"` // frontmatter tags etc.
 }
 
 // ParseTextToChunks reads text/PDF files and splits content into ChunkNodes.
 func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
+	baseMax := getMaxBytesFromEnv("MAX_FILE_SIZE_BYTES", 2*1024*1024)
+	maxTextBytes := getMaxBytesFromEnv("RAG_MAX_TEXT_BYTES", baseMax)
+	maxCSVBytes := getMaxBytesFromEnv("RAG_MAX_CSV_BYTES", baseMax)
+	ext := strings.ToLower(filepath.Ext(filePath))
+
+	switch ext {
+	case ".md", ".markdown", ".feature":
+		if err := checkSize(filePath, maxTextBytes); err != nil {
+			return DocumentNode{}, nil, err
+		}
+		raw, err := os.ReadFile(filePath)
+		if err != nil {
+			return DocumentNode{}, nil, err
+		}
+		if !utf8.Valid(raw) {
+			return DocumentNode{}, nil, fmt.Errorf("file %s is not valid UTF-8", filePath)
+		}
+		return ParseTextToChunksFromContent(filePath, raw)
+	case ".txt":
+		content, err := readTextWithGuards(filePath, maxTextBytes, false)
+		if err != nil {
+			return DocumentNode{}, nil, err
+		}
+		return ParseTextToChunksFromContent(filePath, []byte(content))
+	case ".csv":
+		content, err := readTextWithGuards(filePath, maxCSVBytes, false)
+		if err != nil {
+			return DocumentNode{}, nil, err
+		}
+		return ParseTextToChunksFromContent(filePath, []byte(content))
+	case ".pdf", ".xlsx", ".docx", ".doc", ".xls":
+		docNode, content, err := readDocumentContent(filePath)
+		if err != nil {
+			return DocumentNode{}, nil, err
+		}
+		return chunkPlainDocument(docNode, content)
+	default:
+		return DocumentNode{}, nil, fmt.Errorf("unsupported file type for chunking: %s", ext)
+	}
+}
+
+// ParseTextToChunksFromContent splits already-loaded file bytes into ChunkNodes.
+// Prefer this from the ingestion worker to avoid a second disk read.
+func ParseTextToChunksFromContent(filePath string, raw []byte) (DocumentNode, []ChunkNode, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".md", ".markdown":
+		return parseMarkdownToChunks(filePath, raw)
+	case ".feature":
+		return ParseFeatureToChunksFromContent(filePath, raw)
+	case ".txt", ".csv":
+		docNode := DocumentNode{Path: filePath, Type: strings.TrimPrefix(ext, ".")}
+		return chunkPlainDocument(docNode, string(raw))
+	default:
+		// Allow callers that already extracted text (e.g. tests) to force plain chunking.
+		docNode := DocumentNode{Path: filePath, Type: strings.TrimPrefix(ext, ".")}
+		if docNode.Type == "" {
+			docNode.Type = "txt"
+		}
+		return chunkPlainDocument(docNode, string(raw))
+	}
+}
+
+func readDocumentContent(filePath string) (DocumentNode, string, error) {
 	docNode := DocumentNode{Path: filePath}
-	var chunks []ChunkNode
+	baseMax := getMaxBytesFromEnv("MAX_FILE_SIZE_BYTES", 2*1024*1024)
+	maxPDFBytes := getMaxBytesFromEnv("RAG_MAX_PDF_BYTES", baseMax)
+	maxDocBytes := getMaxBytesFromEnv("RAG_MAX_DOC_BYTES", baseMax)
+	maxXLSBytes := getMaxBytesFromEnv("RAG_MAX_XLS_BYTES", baseMax)
+	ext := strings.ToLower(filepath.Ext(filePath))
 	var content string
 	var err error
 
-	// Size guardrails. Base default follows MAX_FILE_SIZE_BYTES (the single
-	// user-facing knob); per-type RAG_MAX_* env vars override it individually.
-	baseMax := getMaxBytesFromEnv("MAX_FILE_SIZE_BYTES", 2*1024*1024)
-	maxPDFBytes := getMaxBytesFromEnv("RAG_MAX_PDF_BYTES", baseMax)
-	maxTextBytes := getMaxBytesFromEnv("RAG_MAX_TEXT_BYTES", baseMax) // md/txt
-	maxCSVBytes := getMaxBytesFromEnv("RAG_MAX_CSV_BYTES", baseMax)   // csv
-	maxDocBytes := getMaxBytesFromEnv("RAG_MAX_DOC_BYTES", baseMax)   // doc/docx
-	maxXLSBytes := getMaxBytesFromEnv("RAG_MAX_XLS_BYTES", baseMax)   // xls/xlsx
-
-	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".pdf":
 		docNode.Type = "pdf"
 		if err := checkSize(filePath, maxPDFBytes); err != nil {
-			return DocumentNode{}, nil, err
+			return DocumentNode{}, "", err
 		}
 		content, err = readPdf(filePath)
 		if err != nil {
-			return DocumentNode{}, nil, fmt.Errorf("failed to read PDF file %s: %w", filePath, err)
+			return DocumentNode{}, "", fmt.Errorf("failed to read PDF file %s: %w", filePath, err)
 		}
 		content = normalizeNewlines(content)
 		if strings.TrimSpace(content) == "" {
-			return DocumentNode{}, nil, fmt.Errorf("pdf file %s contained no extractable text", filePath)
-		}
-	case ".md", ".txt":
-		docNode.Type = ext[1:]
-		content, err = readTextWithGuards(filePath, maxTextBytes, false)
-		if err != nil {
-			return DocumentNode{}, nil, err
-		}
-	case ".csv":
-		docNode.Type = ext[1:]
-		content, err = readTextWithGuards(filePath, maxCSVBytes, false)
-		if err != nil {
-			return DocumentNode{}, nil, err
+			return DocumentNode{}, "", fmt.Errorf("pdf file %s contained no extractable text", filePath)
 		}
 	case ".xlsx":
-		docNode.Type = ext[1:]
+		docNode.Type = "xlsx"
 		if err := checkSize(filePath, maxXLSBytes); err != nil {
-			return DocumentNode{}, nil, err
+			return DocumentNode{}, "", err
 		}
 		content, err = readXlsx(filePath)
 		if err != nil {
-			return DocumentNode{}, nil, fmt.Errorf("failed to read XLSX file %s: %w", filePath, err)
+			return DocumentNode{}, "", fmt.Errorf("failed to read XLSX file %s: %w", filePath, err)
 		}
 	case ".docx":
-		docNode.Type = ext[1:]
+		docNode.Type = "docx"
 		if err := checkSize(filePath, maxDocBytes); err != nil {
-			return DocumentNode{}, nil, err
+			return DocumentNode{}, "", err
 		}
 		content, err = readDocx(filePath)
 		if err != nil {
-			return DocumentNode{}, nil, fmt.Errorf("failed to read DOCX file %s: %w", filePath, err)
+			return DocumentNode{}, "", fmt.Errorf("failed to read DOCX file %s: %w", filePath, err)
 		}
 	case ".doc", ".xls":
-		// Legacy binary OLE formats have no real parser here; raw-byte reads
-		// produce garbage, so refuse rather than ingest noise.
-		return DocumentNode{}, nil, fmt.Errorf("legacy binary format %s not supported (convert %s to %sx)", ext, ext, ext)
+		return DocumentNode{}, "", fmt.Errorf("legacy binary format %s not supported (convert %s to %sx)", ext, ext, ext)
 	default:
-		return DocumentNode{}, nil, fmt.Errorf("unsupported file type for chunking: %s", ext)
+		return DocumentNode{}, "", fmt.Errorf("unsupported file type for chunking: %s", ext)
 	}
+	return docNode, content, nil
+}
 
-	// Chunking knobs (env-overridable).
-	maxChunkChars := envInt("RAG_MAX_CHUNK_CHARS", 4000)        // hard upper bound per chunk
-	minChunkChars := envInt("RAG_MIN_CHUNK_CHARS", 800)         // merge small paragraphs up to this
-	overlapChars := envInt("RAG_CHUNK_OVERLAP_CHARS", 200)      // overlap when splitting big paragraphs
+func chunkPlainDocument(docNode DocumentNode, content string) (DocumentNode, []ChunkNode, error) {
+	var chunks []ChunkNode
+	maxChunkChars := envInt("RAG_MAX_CHUNK_CHARS", 4000)
+	minChunkChars := envInt("RAG_MIN_CHUNK_CHARS", 800)
+	overlapChars := envInt("RAG_CHUNK_OVERLAP_CHARS", 200)
 
-	// Readers insert \f between physical pages (PDF). Documents without real
-	// pagination (docx/xlsx) have none, so page numbers are reported as 0.
 	pages := strings.Split(content, "\f")
 	paginated := len(pages) > 1
 
@@ -771,7 +1089,6 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 		if paginated {
 			pageNum = pageIdx + 1
 		}
-		// Merge small paragraphs and split oversized ones, then emit chunks.
 		for _, part := range mergeParagraphs(cleaned, minChunkChars, maxChunkChars, overlapChars) {
 			if !IsCleanText(part) {
 				continue
@@ -781,14 +1098,14 @@ func ParseTextToChunks(filePath string) (DocumentNode, []ChunkNode, error) {
 				Content:    part,
 				PageNumber: pageNum,
 				Hash:       fmt.Sprintf("%x", hash),
+				SourceKind: "document",
 			})
 		}
 	}
 
 	if len(chunks) == 0 {
-		return DocumentNode{}, nil, fmt.Errorf("file %s yielded no usable plain text after cleaning", filePath)
+		return DocumentNode{}, nil, fmt.Errorf("file %s yielded no usable plain text after cleaning", docNode.Path)
 	}
-
 	return docNode, chunks, nil
 }
 

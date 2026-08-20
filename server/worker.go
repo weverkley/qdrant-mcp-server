@@ -474,8 +474,9 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	}
 
 	localHash := fmt.Sprintf("%x", sha256.Sum256(content))
+	localFingerprint := ast.IngestFingerprint(content, path, iw.Cfg.ParserMode, iw.Cfg.EmbeddingModel)
 
-	// Scroll Qdrant to check if the file hash matches
+	// Scroll Qdrant to check if the ingest fingerprint matches (content + parser strategy).
 	scrollResult, err := iw.QdrantClient.Scroll(ctx, &qdrant.ScrollPoints{
 		CollectionName: iw.Cfg.CollectionName,
 		Filter: &qdrant.Filter{
@@ -488,12 +489,13 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 		WithPayload: qdrant.NewWithPayloadEnable(true),
 	})
 	if err == nil && len(scrollResult) > 0 {
-		if storedHashVal, exists := scrollResult[0].Payload["file_hash"]; exists {
-			if storedHashVal.GetStringValue() == localHash {
-				log.Printf("File content hash matches for %s, skipping re-indexing.", path)
+		if storedFP, exists := scrollResult[0].Payload["ingest_fingerprint"]; exists {
+			if storedFP.GetStringValue() == localFingerprint {
+				log.Printf("Ingest fingerprint matches for %s, skipping re-indexing.", path)
 				return
 			}
 		}
+		// Legacy points without ingest_fingerprint are reindexed once.
 	}
 
 	// Purge historical offsets right before re-indexing to ensure stale lines wipe out
@@ -509,11 +511,12 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 	isSupportedCode := false
 	isSupportedDoc := false
 	switch ext {
-	case ".go", ".js", ".jsx", ".ts", ".tsx", ".php", ".cs", ".py":
+	case ".go", ".js", ".jsx", ".ts", ".tsx", ".php", ".cs", ".py", ".rs",
+		".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx":
 		if iw.Cfg.ParserMode == "code" || iw.Cfg.ParserMode == "full" {
 			isSupportedCode = true
 		}
-	case ".pdf", ".md", ".txt", ".csv", ".xls", ".xlsx", ".doc", ".docx":
+	case ".pdf", ".md", ".markdown", ".txt", ".csv", ".xls", ".xlsx", ".doc", ".docx", ".feature":
 		if iw.Cfg.ParserMode == "doc" || iw.Cfg.ParserMode == "full" {
 			isSupportedDoc = true
 		}
@@ -537,7 +540,7 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			typeNames = parseResult.Types
 		}
 	} else if isSupportedDoc {
-		_, chunks, err := ast.ParseTextToChunks(path)
+		_, chunks, err := ast.ParseTextToChunksFromContent(path, content)
 		if err == nil && len(chunks) > 0 {
 			docChunks = chunks
 			isDocParsed = true
@@ -581,33 +584,35 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 				pointTags := mergeTags(fileTags, frameworkTags, layerTags, buildFunctionTags(fn, imports))
 				pointSymbols := mergeTags(symbolNames, buildFunctionSymbolNames(fn))
 				payload := map[string]interface{}{
-					"file_path":      relPath,
-					"content":        chunk,
-					"type":           "function",
-					"name":           fn.Name,
-					"start_line":     int64(fn.StartLine),
-					"end_line":       int64(fn.EndLine),
-					"language":       fn.Language,
-					"extension":      extClean,
-					"relative_path":  relPath,
-					"relative_dirs":  relDirs,
-					"namespace":      firstNonEmpty(fn.Namespace, namespace),
-					"container":      fn.Container,
-					"symbol_names":   convertStringSlice(pointSymbols),
-					"framework_tags": convertStringSlice(frameworkTags),
-					"layer_tags":     convertStringSlice(layerTags),
-					"tags":           convertStringSlice(pointTags),
-					"is_test":        isTestFile,
-					"test_framework": testFramework,
-					"file_hash":      localHash,
-					"modified":       modifiedUnix,
-					"updated":        time.Now().Unix(),
-					"branch":         iw.Cfg.Branch,
-					"default_branch": iw.Cfg.DefaultBranch,
+					"file_path":          relPath,
+					"content":            chunk,
+					"type":               "function",
+					"name":               fn.Name,
+					"start_line":         int64(fn.StartLine),
+					"end_line":           int64(fn.EndLine),
+					"language":           fn.Language,
+					"extension":          extClean,
+					"relative_path":      relPath,
+					"relative_dirs":      relDirs,
+					"namespace":          firstNonEmpty(fn.Namespace, namespace),
+					"container":          fn.Container,
+					"symbol_names":       convertStringSlice(pointSymbols),
+					"framework_tags":     convertStringSlice(frameworkTags),
+					"layer_tags":         convertStringSlice(layerTags),
+					"tags":               convertStringSlice(pointTags),
+					"is_test":            isTestFile,
+					"test_framework":     testFramework,
+					"file_hash":          localHash,
+					"ingest_fingerprint": localFingerprint,
+					"modified":           modifiedUnix,
+					"updated":            time.Now().Unix(),
+					"branch":             iw.Cfg.Branch,
+					"default_branch":     iw.Cfg.DefaultBranch,
 				}
 				if fn.Receiver != "" {
 					payload["receiver"] = fn.Receiver
 				}
+				payload["source_kind"] = "code"
 
 				searchText := buildSearchText(chunk, pointTags, pointSymbols, firstNonEmpty(fn.Namespace, namespace), fn.Container, relPath)
 				sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
@@ -639,32 +644,88 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 			id, _ := uuid.FromBytes(hash[:16])
 
 			pointTags := mergeTags(fileTags, layerTags, []string{"document"})
+			sourceKind := chunk.SourceKind
+			if sourceKind == "" {
+				sourceKind = "document"
+			}
+			switch sourceKind {
+			case "markdown":
+				pointTags = mergeTags(pointTags, []string{"markdown"}, chunk.MetaTags)
+			case "gherkin":
+				pointTags = mergeTags(pointTags, []string{"gherkin"}, chunk.FeatureTags, chunk.ScenarioTags)
+			}
+			pointSymbols := mergeTags(symbolNames)
+			if chunk.Heading != "" {
+				pointSymbols = mergeTags(pointSymbols, []string{chunk.Heading})
+			}
+			if chunk.Scenario != "" {
+				pointSymbols = mergeTags(pointSymbols, []string{chunk.Scenario})
+			}
+			if chunk.Feature != "" {
+				pointSymbols = mergeTags(pointSymbols, []string{chunk.Feature})
+			}
+
 			payload := map[string]interface{}{
-				"file_path":      relPath,
-				"content":        chunk.Content,
-				"type":           "doc_chunk",
-				"hash":           chunk.Hash,
-				"extension":      extClean,
-				"relative_path":  relPath,
-				"relative_dirs":  relDirs,
-				"namespace":      namespace,
-				"symbol_names":   convertStringSlice(symbolNames),
-				"framework_tags": convertStringSlice(frameworkTags),
-				"layer_tags":     convertStringSlice(layerTags),
-				"tags":           convertStringSlice(pointTags),
-				"is_test":        isTestFile,
-				"test_framework": testFramework,
-				"file_hash":      localHash,
-				"modified":       modifiedUnix,
-				"updated":        time.Now().Unix(),
-				"branch":         iw.Cfg.Branch,
-				"default_branch": iw.Cfg.DefaultBranch,
+				"file_path":          relPath,
+				"content":            chunk.Content,
+				"type":               "doc_chunk",
+				"hash":               chunk.Hash,
+				"extension":          extClean,
+				"relative_path":      relPath,
+				"relative_dirs":      relDirs,
+				"namespace":          namespace,
+				"symbol_names":       convertStringSlice(pointSymbols),
+				"framework_tags":     convertStringSlice(frameworkTags),
+				"layer_tags":         convertStringSlice(layerTags),
+				"tags":               convertStringSlice(pointTags),
+				"is_test":            isTestFile,
+				"test_framework":     testFramework,
+				"file_hash":          localHash,
+				"ingest_fingerprint": localFingerprint,
+				"modified":           modifiedUnix,
+				"updated":            time.Now().Unix(),
+				"branch":             iw.Cfg.Branch,
+				"default_branch":     iw.Cfg.DefaultBranch,
+				"source_kind":        sourceKind,
 			}
 			// Always persist page_number for consistency; 0 means the format has
 			// no physical pagination (docx/xlsx).
 			payload["page_number"] = int64(chunk.PageNumber)
+			if chunk.Heading != "" {
+				payload["heading"] = chunk.Heading
+			}
+			if len(chunk.HeadingPath) > 0 {
+				payload["heading_path"] = convertStringSlice(chunk.HeadingPath)
+			}
+			if chunk.HeadingLevel > 0 {
+				payload["heading_level"] = int64(chunk.HeadingLevel)
+			}
+			if chunk.Title != "" {
+				payload["doc_title"] = chunk.Title
+			}
+			if chunk.Feature != "" {
+				payload["feature"] = chunk.Feature
+			}
+			if chunk.Rule != "" {
+				payload["rule"] = chunk.Rule
+			}
+			if chunk.Scenario != "" {
+				payload["scenario"] = chunk.Scenario
+			}
+			if len(chunk.FeatureTags) > 0 {
+				payload["feature_tags"] = convertStringSlice(chunk.FeatureTags)
+			}
+			if len(chunk.ScenarioTags) > 0 {
+				payload["scenario_tags"] = convertStringSlice(chunk.ScenarioTags)
+			}
+			if chunk.StartLine > 0 {
+				payload["start_line"] = int64(chunk.StartLine)
+			}
+			if chunk.EndLine > 0 {
+				payload["end_line"] = int64(chunk.EndLine)
+			}
 
-			searchText := buildSearchText(chunk.Content, pointTags, symbolNames, namespace, "", relPath)
+			searchText := buildSearchText(chunk.Content, pointTags, pointSymbols, namespace, chunk.Feature, relPath)
 			sIndices, sValues := ComputeSparseVector(searchText, iw.CustomStopWords)
 
 			points = append(points, &qdrant.PointStruct{
@@ -702,24 +763,26 @@ func (iw *IngestionWorker) SyncFileState(ctx context.Context, path string) {
 
 			pointTags := mergeTags(fileTags, frameworkTags, layerTags, []string{"file_chunk"})
 			payload := map[string]interface{}{
-				"file_path":      relPath,
-				"content":        chunk,
-				"type":           "chunk",
-				"extension":      extClean,
-				"relative_path":  relPath,
-				"relative_dirs":  relDirs,
-				"namespace":      namespace,
-				"symbol_names":   convertStringSlice(symbolNames),
-				"framework_tags": convertStringSlice(frameworkTags),
-				"layer_tags":     convertStringSlice(layerTags),
-				"tags":           convertStringSlice(pointTags),
-				"is_test":        isTestFile,
-				"test_framework": testFramework,
-				"file_hash":      localHash,
-				"modified":       modifiedUnix,
-				"updated":        time.Now().Unix(),
-				"branch":         iw.Cfg.Branch,
-				"default_branch": iw.Cfg.DefaultBranch,
+				"file_path":          relPath,
+				"content":            chunk,
+				"type":               "chunk",
+				"extension":          extClean,
+				"relative_path":      relPath,
+				"relative_dirs":      relDirs,
+				"namespace":          namespace,
+				"symbol_names":       convertStringSlice(symbolNames),
+				"framework_tags":     convertStringSlice(frameworkTags),
+				"layer_tags":         convertStringSlice(layerTags),
+				"tags":               convertStringSlice(pointTags),
+				"is_test":            isTestFile,
+				"test_framework":     testFramework,
+				"file_hash":          localHash,
+				"ingest_fingerprint": localFingerprint,
+				"modified":           modifiedUnix,
+				"updated":            time.Now().Unix(),
+				"branch":             iw.Cfg.Branch,
+				"default_branch":     iw.Cfg.DefaultBranch,
+				"source_kind":        "generic",
 			}
 
 			searchText := buildSearchText(chunk, pointTags, symbolNames, namespace, "", relPath)
@@ -1154,11 +1217,47 @@ func (iw *IngestionWorker) ExecuteVectorSearch(ctx context.Context, query string
 				sb.WriteString(fmt.Sprintf("#### [%d] Function: `%s` in %s (Lines %d-%d) [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, nameVal, filePath, startLine, endLine, resultBranch, rankedPoint.Score, lastSyncedStr))
 			}
 		case "doc_chunk":
-			pageVal := payloadInt(payloadMap, "page_number")
-			if pageVal > 0 {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
-			} else {
-				sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
+			sourceKind := payloadString(payloadMap, "source_kind", "")
+			switch sourceKind {
+			case "gherkin":
+				featureVal := payloadString(payloadMap, "feature", "")
+				scenarioVal := payloadString(payloadMap, "scenario", "")
+				ruleVal := payloadString(payloadMap, "rule", "")
+				startLine := payloadInt(payloadMap, "start_line")
+				endLine := payloadInt(payloadMap, "end_line")
+				label := "Scenario"
+				if scenarioVal != "" {
+					label = fmt.Sprintf("Scenario: `%s`", scenarioVal)
+				}
+				if ruleVal != "" {
+					label = fmt.Sprintf("Rule `%s` / %s", ruleVal, label)
+				}
+				if featureVal != "" {
+					label = fmt.Sprintf("Feature `%s` / %s", featureVal, label)
+				}
+				if startLine > 0 && endLine > 0 {
+					sb.WriteString(fmt.Sprintf("#### [%d] %s in %s (Lines %d-%d) [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, label, filePath, startLine, endLine, resultBranch, rankedPoint.Score, lastSyncedStr))
+				} else {
+					sb.WriteString(fmt.Sprintf("#### [%d] %s in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, label, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
+				}
+			case "markdown":
+				headingPath := payloadStringList(payloadMap, "heading_path")
+				heading := payloadString(payloadMap, "heading", "")
+				section := strings.Join(headingPath, " > ")
+				if section == "" {
+					section = heading
+				}
+				if section == "" {
+					section = "Document preamble"
+				}
+				sb.WriteString(fmt.Sprintf("#### [%d] Markdown Section: `%s` in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, section, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
+			default:
+				pageVal := payloadInt(payloadMap, "page_number")
+				if pageVal > 0 {
+					sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk (Page/Section %d) in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, pageVal, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
+				} else {
+					sb.WriteString(fmt.Sprintf("#### [%d] Doc Chunk in %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
+				}
 			}
 		default:
 			sb.WriteString(fmt.Sprintf("#### [%d] File Chunk: %s [branch: %s] (Match Score: %.2f | Last Synced: %s)\n", i+1, filePath, resultBranch, rankedPoint.Score, lastSyncedStr))
@@ -1258,6 +1357,8 @@ func detectLanguage(filePath string) string {
 		return "javascript"
 	case ".md", ".markdown":
 		return "markdown"
+	case ".feature":
+		return "gherkin"
 	case "":
 		return "text"
 	default:
